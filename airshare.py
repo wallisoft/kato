@@ -26,11 +26,14 @@ from pynput import keyboard, mouse
 from clickboard_core import Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
 BACK_OFF = 24                         # pixels inside the edge when the pointer comes home
 RETURN_KEY = keyboard.Key.scroll_lock
+ESCAPE_PRESSES, ESCAPE_WINDOW = 3, 1.2  # Esc three times within 1.2 s also brings the pointer home
+ALIVE_EVERY = 1.0                       # a driven machine says "still here" this often...
+ALIVE_TIMEOUT = 3.0                     # ...and the driver takes control back after this much silence
 OPPOSITE = {"left": "right", "right": "left"}
 
 
@@ -84,6 +87,19 @@ class CursorHider:
                     pass
 
 
+def input_blocked() -> bool:
+    """True when this machine can't take injected input: Windows lock screen, UAC or login screen."""
+    if platform.system() != "Windows":
+        return False
+    import ctypes
+    u = ctypes.windll.user32
+    h = u.OpenInputDesktop(0, False, 0x0100)       # DESKTOP_SWITCHDESKTOP
+    if not h:
+        return True                                 # the secure desktop is showing
+    u.CloseDesktop(h)
+    return False
+
+
 def key_to_wire(key):
     if isinstance(key, keyboard.Key):
         return {"name": key.name}
@@ -123,6 +139,8 @@ class AirShare(Mesh):
         self._grabs = []
         self._centre = (0, 0)
         self.cursor = CursorHider()
+        self._last_alive = 0.0
+        self._esc_times = []
 
     # ---- which neighbour is on which side ----
     def link_for(self, side):
@@ -152,6 +170,7 @@ class AirShare(Mesh):
     def enter_remote(self, link, side, y_ratio):
         bx, by, bw, bh = self.bounds
         self.remote = (link, side)
+        self._last_alive = time.time()
         link.send({"type": "kvm_enter", "from": OPPOSITE[side], "y": y_ratio})
         self._centre = (bx + bw // 2, by + bh // 2)
         self.mouse.position = self._centre
@@ -198,6 +217,10 @@ class AirShare(Mesh):
 
     def _flush_loop(self):
         while self.remote:
+            if time.time() - self._last_alive > ALIVE_TIMEOUT:
+                log("the other machine went quiet (asleep, locked or gone): taking control back")
+                threading.Thread(target=self.leave_remote, daemon=True).start()
+                return
             with self._acc_lock:
                 dx, dy = self._acc
                 self._acc = [0, 0]
@@ -217,6 +240,13 @@ class AirShare(Mesh):
         if key == RETURN_KEY:
             threading.Thread(target=self.leave_remote, daemon=True).start()
             return
+        if key == keyboard.Key.esc:
+            now = time.time()
+            self._esc_times = [t for t in self._esc_times if now - t < ESCAPE_WINDOW] + [now]
+            if len(self._esc_times) >= ESCAPE_PRESSES:
+                self._esc_times = []
+                threading.Thread(target=self.leave_remote, daemon=True).start()
+                return
         wire = key_to_wire(key)
         if wire and self.remote:
             self._sent_down[json.dumps(wire, sort_keys=True)] = wire
@@ -232,11 +262,20 @@ class AirShare(Mesh):
     def on_frame(self, link, header, payload):
         t = header.get("type")
         bx, by, bw, bh = self.bounds
+        if t == "kvm_alive":
+            if self.remote and self.remote[0] is link:
+                self._last_alive = time.time()
+            return
         if t == "kvm_enter":
+            if input_blocked():
+                link.send({"type": "kvm_leave", "y": float(header.get("y", 0.5))})
+                log("refused control: this machine is locked")
+                return
             side = header.get("from", "left")
             x = bx + 2 if side == "left" else bx + bw - 3
             self.mouse.position = (x, by + int(float(header.get("y", 0.5)) * bh))
             self.driven_by = (link, side)
+            threading.Thread(target=self._alive_loop, args=(link,), daemon=True).start()
         elif t == "kvm_move" and self.driven_by:
             self.mouse.move(int(header.get("dx", 0)), int(header.get("dy", 0)))
             x, y = self.mouse.position
@@ -268,6 +307,18 @@ class AirShare(Mesh):
         elif t == "kvm_leave":
             if self.remote and self.remote[0] is link:
                 self.leave_remote(float(header.get("y", 0.5)))
+
+    def _alive_loop(self, link):
+        """While we're being driven: heartbeat, and hand back if we get locked."""
+        while self.driven_by and self.driven_by[0] is link and link.alive:
+            if input_blocked():
+                self._release_all()
+                self.driven_by = None
+                link.send({"type": "kvm_leave", "y": 0.5})
+                log("locked: handed control back")
+                return
+            link.send({"type": "kvm_alive"})
+            time.sleep(ALIVE_EVERY)
 
     def _release_all(self):
         for k in list(self._held_keys.values()):
