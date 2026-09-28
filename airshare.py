@@ -26,7 +26,7 @@ from pynput import keyboard, mouse
 from clickboard_core import Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
 BACK_OFF = 24                         # pixels inside the edge when the pointer comes home
@@ -46,6 +46,42 @@ def screen_bounds():
     w, h = root.winfo_screenwidth(), root.winfo_screenheight()
     root.destroy()
     return (0, 0, w, h)
+
+
+class CursorHider:
+    """Hides this machine's pointer while it's driving another one (X11 via XFixes)."""
+
+    def __init__(self):
+        self.d = None
+        self._lock = threading.Lock()
+        if platform.system() != "Linux":
+            return
+        try:
+            from Xlib import display
+            self.d = display.Display()
+            self.root = self.d.screen().root
+            self.d.xfixes_query_version()
+        except Exception as exc:
+            log(f"can't hide the pointer here: {exc}")
+            self.d = None
+
+    def hide(self):
+        with self._lock:
+            if self.d:
+                try:
+                    self.root.xfixes_hide_cursor()
+                    self.d.sync()
+                except Exception:
+                    pass
+
+    def show(self):
+        with self._lock:
+            if self.d:
+                try:
+                    self.root.xfixes_show_cursor()
+                    self.d.sync()
+                except Exception:
+                    pass
 
 
 def key_to_wire(key):
@@ -86,6 +122,7 @@ class AirShare(Mesh):
         self._sent_down = {}     # keys held down while driving a remote machine
         self._grabs = []
         self._centre = (0, 0)
+        self.cursor = CursorHider()
 
     # ---- which neighbour is on which side ----
     def link_for(self, side):
@@ -118,6 +155,7 @@ class AirShare(Mesh):
         link.send({"type": "kvm_enter", "from": OPPOSITE[side], "y": y_ratio})
         self._centre = (bx + bw // 2, by + bh // 2)
         self.mouse.position = self._centre
+        self.cursor.hide()
         self._grabs = [
             mouse.Listener(on_move=self._g_move, on_click=self._g_click, on_scroll=self._g_scroll, suppress=True),
             keyboard.Listener(on_press=self._g_press, on_release=self._g_release, suppress=True),
@@ -135,15 +173,19 @@ class AirShare(Mesh):
         for g in self._grabs:
             g.stop()
         self._grabs = []
+        time.sleep(0.05)          # let in-flight parking moves drain before placing the pointer
         for k in list(self._sent_down.values()):
             link.send({"type": "kvm_key", "key": k, "down": False})
         self._sent_down.clear()
         bx, by, bw, bh = self.bounds
         x = bx + bw - 1 - BACK_OFF if side == "right" else bx + BACK_OFF
         self.mouse.position = (x, by + int(y_ratio * bh))
+        self.cursor.show()
         log("back home")
 
     def _g_move(self, x, y):
+        if not self.remote:
+            return True           # control has ended: stop parking the pointer
         cx, cy = self._centre
         dx, dy = x - cx, y - cy
         if dx or dy:
