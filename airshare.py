@@ -18,15 +18,20 @@ Discovery, trust and TLS come from clickboard_core (passphrase mode for now).
 import argparse
 import json
 import platform
+import queue
+import secrets
+import socket
 import threading
 import time
 
+import pystray
+from PIL import Image, ImageDraw
 from pynput import keyboard, mouse
 
-from clickboard_core import Config, Mesh, log, set_app
+from clickboard_core import MIN_PASSPHRASE, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
 BACK_OFF = 24                         # pixels inside the edge when the pointer comes home
@@ -35,6 +40,17 @@ ESCAPE_PRESSES, ESCAPE_WINDOW = 3, 1.2  # Esc three times within 1.2 s also brin
 ALIVE_EVERY = 1.0                       # a driven machine says "still here" this often...
 ALIVE_TIMEOUT = 3.0                     # ...and the driver takes control back after this much silence
 OPPOSITE = {"left": "right", "right": "left"}
+CONTROL_PORT = 47811                  # localhost only: lets a second launch talk to the running copy
+
+COLOUR_READY = (34, 197, 94, 255)     # green: connected, ready to cross over
+COLOUR_ACTIVE = (59, 130, 246, 255)   # blue: sharing right now (driving, or being driven)
+COLOUR_OFF = (249, 115, 22, 255)      # orange: nobody connected, or paused
+
+WORDS = ("amber", "anchor", "apple", "badger", "banjo", "beacon", "bramble", "cactus", "castle", "cobalt",
+         "comet", "copper", "dingo", "ember", "falcon", "fern", "garnet", "harbour", "hazel", "island",
+         "jigsaw", "kettle", "lantern", "lemon", "maple", "marble", "meadow", "nutmeg", "orbit", "otter",
+         "pebble", "pepper", "piano", "quartz", "raven", "ribbon", "saffron", "tango", "thistle", "tulip",
+         "velvet", "walnut", "willow", "yonder", "zephyr", "biscuit", "puffin", "saucer")
 
 
 def screen_bounds():
@@ -100,6 +116,27 @@ def input_blocked() -> bool:
     return False
 
 
+def ensure_pointer_visible() -> bool:
+    """Windows hides the pointer when it thinks no mouse is in use, and injected movement doesn't
+    count. Switching on Mouse Keys makes Windows show it. Returns True if it changed anything."""
+    if platform.system() != "Windows":
+        return False
+    import ctypes
+
+    class MOUSEKEYS(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint) for n in ("cbSize", "dwFlags", "iMaxSpeed", "iTimeToMaxSpeed",
+                                                 "iCtrlSpeed", "dwReserved1", "dwReserved2")]
+    mk = MOUSEKEYS()
+    mk.cbSize = ctypes.sizeof(mk)
+    spi = ctypes.windll.user32.SystemParametersInfoW
+    if not spi(0x36, mk.cbSize, ctypes.byref(mk), 0):        # SPI_GETMOUSEKEYS
+        return False
+    if mk.dwFlags & 0x1:
+        return False                                          # already on
+    mk.dwFlags |= 0x3                                         # available + on
+    return bool(spi(0x37, mk.cbSize, ctypes.byref(mk), 3))    # SPI_SETMOUSEKEYS, save + broadcast
+
+
 def key_to_wire(key):
     if isinstance(key, keyboard.Key):
         return {"name": key.name}
@@ -141,6 +178,21 @@ class AirShare(Mesh):
         self.cursor = CursorHider()
         self._last_alive = 0.0
         self._esc_times = []
+        self.paused = False
+        self.icon = None
+        self._settings_open = False
+        self._outq = queue.Queue()        # input callbacks never touch the network themselves
+        threading.Thread(target=self._send_loop, daemon=True).start()
+
+    # ---- sending: callbacks only enqueue, so input hooks can never stall ----
+    def _send(self, link, header):
+        self._outq.put((link, header))
+
+    def _send_loop(self):
+        while True:
+            link, header = self._outq.get()
+            if link.alive:
+                link.send(header)
 
     # ---- which neighbour is on which side ----
     def link_for(self, side):
@@ -157,16 +209,29 @@ class AirShare(Mesh):
         bx, by, bw, bh = self.bounds
 
         def on_move(x, y):
-            if self.remote or self.driven_by:
+            if self.remote or self.driven_by or self.paused or self._entering:
                 return
             side = "right" if x >= bx + bw - 1 else "left" if x <= bx else None
             if side:
                 link = self.link_for(side)
                 if link:
-                    self.enter_remote(link, side, (y - by) / max(bh, 1))
+                    # Hand the work to a thread: the hook itself must return straight away.
+                    self._entering = True
+                    threading.Thread(target=self._enter_safely, args=(link, side, (y - by) / max(bh, 1)),
+                                     daemon=True).start()
+        self._entering = False
         mouse.Listener(on_move=on_move).start()
 
     # ---- driving another machine ----
+    def _enter_safely(self, link, side, y_ratio):
+        try:
+            self.enter_remote(link, side, y_ratio)
+        except Exception as exc:
+            log(f"couldn't cross over: {exc}")
+            self.leave_remote()
+        finally:
+            self._entering = False
+
     def enter_remote(self, link, side, y_ratio):
         bx, by, bw, bh = self.bounds
         self.remote = (link, side)
@@ -181,8 +246,10 @@ class AirShare(Mesh):
         ]
         for g in self._grabs:
             g.start()
+        self._entering = False
         threading.Thread(target=self._flush_loop, daemon=True).start()
         log(f"now controlling {self.layout.get(side)}")
+        self.refresh_ui()
 
     def leave_remote(self, y_ratio=0.5):
         if not self.remote:
@@ -201,6 +268,7 @@ class AirShare(Mesh):
         self.mouse.position = (x, by + int(y_ratio * bh))
         self.cursor.show()
         log("back home")
+        self.refresh_ui()
 
     def _g_move(self, x, y):
         if not self.remote:
@@ -230,11 +298,11 @@ class AirShare(Mesh):
 
     def _g_click(self, x, y, button, pressed):
         if self.remote:
-            self.remote[0].send({"type": "kvm_btn", "button": button.name, "down": pressed})
+            self._send(self.remote[0], {"type": "kvm_btn", "button": button.name, "down": pressed})
 
     def _g_scroll(self, x, y, dx, dy):
         if self.remote:
-            self.remote[0].send({"type": "kvm_scroll", "dx": dx, "dy": dy})
+            self._send(self.remote[0], {"type": "kvm_scroll", "dx": dx, "dy": dy})
 
     def _g_press(self, key):
         if key == RETURN_KEY:
@@ -250,13 +318,13 @@ class AirShare(Mesh):
         wire = key_to_wire(key)
         if wire and self.remote:
             self._sent_down[json.dumps(wire, sort_keys=True)] = wire
-            self.remote[0].send({"type": "kvm_key", "key": wire, "down": True})
+            self._send(self.remote[0], {"type": "kvm_key", "key": wire, "down": True})
 
     def _g_release(self, key):
         wire = key_to_wire(key)
         if wire and self.remote:
             self._sent_down.pop(json.dumps(wire, sort_keys=True), None)
-            self.remote[0].send({"type": "kvm_key", "key": wire, "down": False})
+            self._send(self.remote[0], {"type": "kvm_key", "key": wire, "down": False})
 
     # ---- being driven by another machine, and replies to us ----
     def on_frame(self, link, header, payload):
@@ -267,15 +335,18 @@ class AirShare(Mesh):
                 self._last_alive = time.time()
             return
         if t == "kvm_enter":
-            if input_blocked():
+            if input_blocked() or self.paused:
                 link.send({"type": "kvm_leave", "y": float(header.get("y", 0.5))})
-                log("refused control: this machine is locked")
+                log("refused control: this machine is " + ("paused" if self.paused else "locked"))
                 return
+            if ensure_pointer_visible():
+                self.notify("Turned on Windows Mouse Keys so the pointer stays visible when another machine drives this one.")
             side = header.get("from", "left")
             x = bx + 2 if side == "left" else bx + bw - 3
             self.mouse.position = (x, by + int(float(header.get("y", 0.5)) * bh))
             self.driven_by = (link, side)
             threading.Thread(target=self._alive_loop, args=(link,), daemon=True).start()
+            self.refresh_ui()
         elif t == "kvm_move" and self.driven_by:
             self.mouse.move(int(header.get("dx", 0)), int(header.get("dy", 0)))
             x, y = self.mouse.position
@@ -284,6 +355,7 @@ class AirShare(Mesh):
                 self._release_all()
                 self.driven_by = None
                 link.send({"type": "kvm_leave", "y": (y - by) / max(bh, 1)})
+                self.refresh_ui()
         elif t == "kvm_btn" and self.driven_by:
             btn = getattr(mouse.Button, str(header.get("button")), None)
             if btn:
@@ -337,23 +409,233 @@ class AirShare(Mesh):
         Mesh.on_link_closed(self, link, why)
 
 
+    # ---- tray and UI ----
+    def notify(self, msg):
+        log(msg)
+        try:
+            if platform.system() == "Linux" and __import__("shutil").which("notify-send"):
+                __import__("subprocess").Popen(["notify-send", "AirShare", msg])
+            elif self.icon:
+                self.icon.notify(msg, "AirShare")
+        except Exception:
+            pass
+
+    def status_line(self):
+        if self.status:
+            return self.status
+        if self.paused:
+            return "Paused"
+        if self.remote:
+            return f"Controlling {self.layout.get(self.remote[1])}"
+        if self.driven_by:
+            return f"Being controlled by {self.peers.get(self.driven_by[0].peer_id, {}).get('name', 'another machine')}"
+        n = self.connected_count()
+        if not n:
+            return "Looking for your other machines..."
+        return f"Ready: {n} machine{'s' if n != 1 else ''} connected"
+
+    def refresh_ui(self):
+        if not self.icon:
+            return
+        if self.paused or not self.connected_count():
+            colour = COLOUR_OFF
+        elif self.remote or self.driven_by:
+            colour = COLOUR_ACTIVE
+        else:
+            colour = COLOUR_READY
+        try:
+            self.icon.icon = dot(colour)
+            self.icon.title = f"AirShare - {self.status_line()}"
+            self.icon.update_menu()
+        except Exception:
+            pass
+
+    def build_menu(self):
+        items = [pystray.MenuItem(lambda i: "Resume sharing" if self.paused else "Pause sharing", self.toggle_pause, default=True),
+                 pystray.MenuItem(self.status_line(), None, enabled=False),
+                 pystray.Menu.SEPARATOR]
+        for side in ("left", "right"):
+            name = self.layout.get(side)
+            if name:
+                up = self.link_for(side) is not None
+                mark = "\u25cf" if up else "\u25cb"
+                items.append(pystray.MenuItem(f"{mark} {name} ({side})", None, enabled=False))
+        items += [pystray.Menu.SEPARATOR,
+                  pystray.MenuItem("Layout and settings...", lambda: self.open_settings()),
+                  pystray.MenuItem("Quit", self.quit)]
+        return items
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+        if self.paused:
+            self.leave_remote()
+        log("sharing paused" if self.paused else "sharing resumed")
+        self.refresh_ui()
+
+    def quit(self):
+        self.leave_remote()
+        self.stop()
+        if self.icon:
+            self.icon.stop()
+
+    def control_loop(self):
+        try:
+            cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            cs.bind(("127.0.0.1", CONTROL_PORT))
+            cs.listen(4)
+        except OSError:
+            return
+        while self.running:
+            try:
+                conn, _ = cs.accept()
+            except OSError:
+                continue
+            with conn:
+                try:
+                    cmd = conn.recv(64).decode(errors="ignore").strip()
+                    conn.sendall(b"ok\n")
+                except OSError:
+                    continue
+            {"settings": self.open_settings, "toggle": self.toggle_pause, "quit": self.quit}.get(cmd, lambda: None)()
+
+    def open_settings(self):
+        if self._settings_open:
+            return
+        self._settings_open = True
+        threading.Thread(target=self._settings_window, daemon=True).start()
+
+    def _settings_window(self):
+        try:
+            SettingsWindow(self).run()
+        except Exception as exc:
+            log(f"settings window error: {exc}")
+        finally:
+            self._settings_open = False
+
+    def save_layout(self, layout):
+        self.layout = {k: v for k, v in layout.items() if v}
+        (C.CONFIG_DIR / "layout.json").write_text(json.dumps(self.layout, indent=2))
+        log(f"layout: {self.layout}")
+        self.refresh_ui()
+
+
+def dot(colour):
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse((8, 8, 56, 56), fill=colour, outline=(255, 255, 255, 200), width=3)
+    return img
+
+
+class SettingsWindow:
+    NOBODY = "(nobody)"
+
+    def __init__(self, app):
+        self.app = app
+
+    def run(self):
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+        self.tk, self.messagebox = tk, messagebox
+        app = self.app
+        root = tk.Tk()
+        self.root = root
+        root.title("AirShare")
+        outer = ttk.Frame(root, padding=16)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text="Layout", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(outer, text="Which machine sits on each side of this one? The pointer crosses over at that edge "
+                              "and arrives at the same height.", wraplength=420, foreground="#555").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(2, 10))
+        self.sides = {}
+        names = self._names()
+        for i, side in enumerate(("left", "right")):
+            ttk.Label(outer, text=f"On the {side}:").grid(row=2 + i, column=0, sticky="w", pady=3)
+            var = tk.StringVar(value=app.layout.get(side) or self.NOBODY)
+            box = ttk.Combobox(outer, textvariable=var, values=names, state="readonly", width=28)
+            box.grid(row=2 + i, column=1, sticky="w", padx=8)
+            self.sides[side] = (var, box)
+        ttk.Label(outer, text=f"This machine: {app.cfg.name}", foreground="#555").grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 14))
+
+        ttk.Label(outer, text="Shared passphrase", font=("TkDefaultFont", 11, "bold")).grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Label(outer, text=f"The same on every machine, {MIN_PASSPHRASE}+ characters.", foreground="#555").grid(row=6, column=0, columnspan=3, sticky="w")
+        self.pass_var = tk.StringVar(value=app.cfg.passphrase)
+        ttk.Entry(outer, textvariable=self.pass_var, width=34).grid(row=7, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        ttk.Button(outer, text="Generate", command=lambda: self.pass_var.set("-".join(secrets.choice(WORDS) for _ in range(4)))).grid(row=7, column=2, padx=(8, 0))
+
+        self.status_var = tk.StringVar()
+        ttk.Label(outer, textvariable=self.status_var, foreground="#555", wraplength=420).grid(row=8, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        ttk.Button(outer, text="Save", command=self.save).grid(row=9, column=2, sticky="e", pady=(12, 0))
+
+        self.tick()
+        root.update_idletasks()
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(300, lambda: root.attributes("-topmost", False))
+        root.after(100, root.focus_force)
+        root.mainloop()
+
+    def _names(self):
+        return [self.NOBODY] + sorted({p["name"] for p in self.app.peers.values()} |
+                                      {v for v in self.app.layout.values() if v})
+
+    def tick(self):
+        self.status_var.set(self.app.status_line())
+        names = self._names()
+        for var, box in self.sides.values():
+            if list(box.cget("values")) != names:
+                box.configure(values=names)
+        self.root.after(1000, self.tick)
+
+    def save(self):
+        layout = {side: (var.get() if var.get() != self.NOBODY else None) for side, (var, _) in self.sides.items()}
+        if layout["left"] and layout["left"] == layout["right"]:
+            self.messagebox.showerror("AirShare", "A machine can't be on both sides.")
+            return
+        passphrase = self.pass_var.get().strip()
+        if len(passphrase) < MIN_PASSPHRASE:
+            self.messagebox.showerror("AirShare", f"The passphrase needs at least {MIN_PASSPHRASE} characters.")
+            return
+        self.app.save_layout(layout)
+        if passphrase != self.app.cfg.passphrase:
+            self.app.cfg.mode, self.app.cfg.passphrase = "local", passphrase
+            self.app.cfg.save()
+            self.app.reset_for_mode_change()
+        self.status_var.set("Saved.")
+
+
+def send_to_running(cmd: str) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", CONTROL_PORT), timeout=1) as s:
+            s.sendall((cmd + "\n").encode())
+            return s.recv(8).startswith(b"ok")
+    except OSError:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="AirShare: one keyboard and mouse across your machines")
     ap.add_argument("--passphrase", help="shared passphrase (same on every machine, 8+ characters)")
     ap.add_argument("--left", help="name of the machine to the left of this one")
     ap.add_argument("--right", help="name of the machine to the right of this one")
     ap.add_argument("--name", help="this machine's name (default: its hostname)")
+    ap.add_argument("--settings", action="store_true", help="open settings in the running copy")
+    ap.add_argument("--quit", action="store_true", help="quit the running copy")
     a = ap.parse_args()
+
+    # A second launch (e.g. clicking it in the menu again) talks to the running copy instead.
+    if send_to_running("quit" if a.quit else "settings"):
+        return
+    if a.quit:
+        return
 
     set_app("AirShare", VERSION)
     C.DEFAULT_PORT, C.BEACON_PORT = PORT, BEACON_PORT
-
+    C.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     layout_file = C.CONFIG_DIR / "layout.json"
     layout = json.loads(layout_file.read_text()) if layout_file.exists() else {}
     for side in ("left", "right"):
         if getattr(a, side):
             layout[side] = getattr(a, side)
-    C.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     layout_file.write_text(json.dumps(layout, indent=2))
 
     app = AirShare(layout)
@@ -361,27 +643,27 @@ def main():
         app.cfg.name = a.name
     if a.passphrase:
         app.cfg.mode, app.cfg.passphrase = "local", a.passphrase
+    app.cfg.mode = "local"
     app.cfg.port = PORT
     app.cfg.save()
     app._set_local_key()
-    if not app._local_key:
-        raise SystemExit("Run once with --passphrase (8+ characters), the same on every machine.")
 
     app.start()
     app.watch_edges()
+    threading.Thread(target=app.control_loop, daemon=True).start()
     log(f"AirShare {VERSION} as '{app.cfg.name}', screen {app.bounds[2]}x{app.bounds[3]}, layout {layout}")
-    log("Scroll Lock brings the pointer home. Ctrl+C here to quit.")
-    last = None
-    try:
-        while True:
-            now = sorted(p["name"] for pid, p in app.peers.items() if app.links.get(pid) and app.links[pid].alive)
-            if now != last:
-                log(f"connected to: {', '.join(now) or 'nobody yet'}")
-                last = now
+    if not app._local_key or not layout:
+        threading.Timer(1.0, app.open_settings).start()
+    app.icon = pystray.Icon("airshare", dot(COLOUR_OFF), "AirShare", menu=pystray.Menu(lambda: app.build_menu()))
+    def keep_fresh():
+        while app.running:
             time.sleep(2)
+            app.refresh_ui()
+    threading.Thread(target=keep_fresh, daemon=True).start()
+    try:
+        app.icon.run()
     except KeyboardInterrupt:
-        app.leave_remote()
-        app.stop()
+        app.quit()
 
 
 if __name__ == "__main__":
