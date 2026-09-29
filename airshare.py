@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMe
 from clickboard_core import MIN_PASSPHRASE, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -59,11 +59,12 @@ def screen_bounds():
         import ctypes
         u = ctypes.windll.user32
         return (u.GetSystemMetrics(76), u.GetSystemMetrics(77), u.GetSystemMetrics(78), u.GetSystemMetrics(79))
-    import tkinter as tk
-    root = tk.Tk()
-    root.withdraw()
-    w, h = root.winfo_screenwidth(), root.winfo_screenheight()
-    root.destroy()
+    # X11: ask the X server for the whole desktop (all monitors), in real pixels.
+    from Xlib import display
+    d = display.Display()
+    scr = d.screen()
+    w, h = scr.width_in_pixels, scr.height_in_pixels
+    d.close()
     return (0, 0, w, h)
 
 
