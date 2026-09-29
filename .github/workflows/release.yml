@@ -77,7 +77,7 @@ jobs:
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads --enable-plugin=pyside6 \
             --include-module=pynput.keyboard._xorg --include-module=pynput.mouse._xorg \
-            --include-package=Xlib --output-dir=build airshare.py
+            --include-package=Xlib --output-filename=airshare --output-dir=build airshare.py
       - name: Package
         run: |
           mv build/airshare.dist airshare

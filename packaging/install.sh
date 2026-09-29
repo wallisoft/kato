@@ -37,7 +37,16 @@ curl -fsSL "$URL" -o "$tmp/airshare.tar.gz"
 rm -rf "$DEST"
 mkdir -p "$DEST"
 tar xzf "$tmp/airshare.tar.gz" -C "$DEST" --strip-components=1
-chmod +x "$DEST/airshare"
+# Older builds name the program airshare.bin; make sure "airshare" exists either way.
+if [ ! -f "$DEST/airshare" ] && [ -f "$DEST/airshare.bin" ]; then
+    ln -sf "$DEST/airshare.bin" "$DEST/airshare"
+fi
+if [ ! -x "$DEST/airshare" ] && [ ! -L "$DEST/airshare" ]; then
+    echo "The download doesn't contain the AirShare program. Please report this." >&2
+    ls "$DEST" >&2
+    exit 1
+fi
+chmod +x "$DEST/airshare" 2>/dev/null || true
 
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.config/autostart"
 ln -sf "$DEST/airshare" "$HOME/.local/bin/airshare"

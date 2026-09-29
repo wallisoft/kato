@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMe
 from clickboard_core import MIN_PASSPHRASE, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -288,6 +288,8 @@ class AirShare(Mesh):
 
     def enter_remote(self, link, side, pos):
         bx, by, bw, bh = self.bounds
+        if self.remote or self.driven_by or self.paused:
+            return                        # one thing at a time: never drive while driven
         self.remote = (link, side)
         self._last_alive = time.time()
         link.send({"type": "kvm_enter", "from": OPPOSITE[side], "pos": pos})
@@ -331,6 +333,14 @@ class AirShare(Mesh):
         self.refresh_ui()
 
     def _g_move(self, x, y):
+        try:
+            return self._g_move_inner(x, y)
+        except Exception as exc:
+            log(f"pointer handling failed, releasing control to be safe: {exc}")
+            threading.Thread(target=self.leave_remote, daemon=True).start()
+            return True
+
+    def _g_move_inner(self, x, y):
         if not self.remote:
             return True
         cx, cy = self._centre
@@ -349,6 +359,15 @@ class AirShare(Mesh):
                 log("the other machine went quiet (asleep, locked or gone): taking control back")
                 threading.Thread(target=self.leave_remote, daemon=True).start()
                 return
+            if any(not g.running for g in self._grabs):
+                log("input capture stopped unexpectedly: taking control back")
+                threading.Thread(target=self.leave_remote, daemon=True).start()
+                return
+            if input_blocked():
+                # Ctrl+Alt+Del (or UAC) on THIS Windows machine: always hand control back.
+                log("secure screen on this machine: taking control back")
+                threading.Thread(target=self.leave_remote, daemon=True).start()
+                return
             with self._acc_lock:
                 dx, dy = self._acc
                 self._acc = [0, 0]
@@ -365,6 +384,13 @@ class AirShare(Mesh):
             self._send(self.remote[0], {"type": "kvm_scroll", "dx": dx, "dy": dy})
 
     def _g_press(self, key):
+        try:
+            self._g_press_inner(key)
+        except Exception as exc:
+            log(f"key handling failed, releasing control to be safe: {exc}")
+            threading.Thread(target=self.leave_remote, daemon=True).start()
+
+    def _g_press_inner(self, key):
         if key == RETURN_KEY:
             threading.Thread(target=self.leave_remote, daemon=True).start()
             return
@@ -381,6 +407,13 @@ class AirShare(Mesh):
             self._send(self.remote[0], {"type": "kvm_key", "key": wire, "down": True})
 
     def _g_release(self, key):
+        try:
+            self._g_release_inner(key)
+        except Exception as exc:
+            log(f"key handling failed, releasing control to be safe: {exc}")
+            threading.Thread(target=self.leave_remote, daemon=True).start()
+
+    def _g_release_inner(self, key):
         wire = key_to_wire(key)
         if wire and self.remote:
             self._sent_down.pop(json.dumps(wire, sort_keys=True), None)
@@ -401,6 +434,16 @@ class AirShare(Mesh):
             if self.remote and self.remote[0] is link:
                 self._last_alive = time.time()
         elif t == "kvm_enter":
+            if self.remote:
+                # Both machines tried to cross at once: nobody drives. Release ours too.
+                link.send({"type": "kvm_leave", "pos": float(header.get("pos", 0.5))})
+                log("refused control: this machine was already driving another; both released")
+                threading.Thread(target=self.leave_remote, daemon=True).start()
+                return
+            if self.driven_by and self.driven_by[0] is not link:
+                link.send({"type": "kvm_leave", "pos": float(header.get("pos", 0.5))})
+                log("refused control: already being driven by another machine")
+                return
             if input_blocked() or self.paused:
                 link.send({"type": "kvm_leave", "pos": float(header.get("pos", 0.5))})
                 log("refused control: this machine is " + ("paused" if self.paused else "locked"))
