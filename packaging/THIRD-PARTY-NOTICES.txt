@@ -1,0 +1,21 @@
+AirShare - third-party software notices
+=======================================
+
+AirShare is proprietary software (c) Wallisoft. It includes the following
+third-party components under their own licences.
+
+Qt for Python (PySide6) and the Qt libraries
+  Licence: GNU Lesser General Public License v3 (LGPL-3.0)
+  https://www.qt.io/licensing  |  https://doc.qt.io/qtforpython/licenses.html
+  The Qt libraries are included as separate, unmodified files in AirShare's
+  installation folder and may be replaced with compatible versions. Source code
+  for Qt is available from https://download.qt.io/ and on request from Wallisoft
+  (hello@tiny-web.uk).
+
+pynput - LGPL-3.0 - https://github.com/moses-palmer/pynput
+python-xlib (Linux) - LGPL-2.1 - https://github.com/python-xlib/python-xlib
+cryptography - Apache-2.0 / BSD - https://github.com/pyca/cryptography
+Pillow - MIT-CMU (HPND) - https://github.com/python-pillow/Pillow
+pyperclip - BSD-3-Clause - https://github.com/asweigart/pyperclip
+clickboard-core - PolyForm Small Business 1.0.0 - https://github.com/wallisoft/clickboard
+Python - PSF License - https://www.python.org/
