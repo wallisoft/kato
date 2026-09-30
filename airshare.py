@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QLineEdit, QMe
 from clickboard_core import MIN_PASSPHRASE, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -138,6 +138,59 @@ def ensure_pointer_visible() -> bool:
     return bool(spi(0x37, mk.cbSize, ctypes.byref(mk), 3))    # SPI_SETMOUSEKEYS, save + broadcast
 
 
+LINUX = platform.system() == "Linux"
+
+
+class XGrabber:
+    """Linux/X11: AirShare's own explicit hold on the keyboard and pointer, on a dedicated
+    X connection, with an explicit release. (Creating and destroying capturing listeners
+    for every crossing could leave the keyboard held; this can't.)"""
+
+    def __init__(self):
+        from Xlib import X, display
+        self.X = X
+        self.d = display.Display()
+        self.root = self.d.screen().root
+        self.lock = threading.Lock()
+        self.grabbed = False
+        threading.Thread(target=self._drain, daemon=True).start()
+
+    def _drain(self):
+        # Events delivered to our grab are never used; read and drop them so nothing backs up.
+        while True:
+            try:
+                self.d.next_event()
+            except Exception:
+                time.sleep(0.1)
+
+    def grab(self) -> bool:
+        X = self.X
+        with self.lock:
+            p = self.root.grab_pointer(True, X.ButtonPressMask | X.ButtonReleaseMask | X.PointerMotionMask,
+                                       X.GrabModeAsync, X.GrabModeAsync, X.NONE, X.NONE, X.CurrentTime)
+            k = self.root.grab_keyboard(True, X.GrabModeAsync, X.GrabModeAsync, X.CurrentTime)
+            self.d.sync()
+            self.grabbed = True
+            if p != X.GrabSuccess or k != X.GrabSuccess:
+                self._release_locked()
+                return False
+            return True
+
+    def release(self):
+        with self.lock:
+            self._release_locked()
+
+    def _release_locked(self):
+        X = self.X
+        try:
+            self.d.ungrab_pointer(X.CurrentTime)
+            self.d.ungrab_keyboard(X.CurrentTime)
+            self.d.sync()
+        except Exception as exc:
+            log(f"release failed: {exc}")
+        self.grabbed = False
+
+
 def key_to_wire(key):
     if isinstance(key, keyboard.Key):
         return {"name": key.name}
@@ -191,6 +244,18 @@ class AirShare(Mesh):
         self.paused = False
         self._outq = queue.Queue()      # input callbacks never touch the network themselves
         threading.Thread(target=self._send_loop, daemon=True).start()
+        self.xgrab = XGrabber() if LINUX else None
+        self._watchers = []
+        if LINUX:
+            threading.Thread(target=self._self_heal, daemon=True).start()
+
+    def _self_heal(self):
+        """Twice a second: if we hold the keyboard but aren't driving anything, let go."""
+        while True:
+            time.sleep(0.5)
+            if self.xgrab and self.xgrab.grabbed and not self.remote:
+                log("held input while not driving: released it")
+                self.xgrab.release()
 
     # ---- plumbing ----
     def _send(self, link, header):
@@ -275,7 +340,36 @@ class AirShare(Mesh):
             if link:
                 self._entering = True        # the hook must return at once; do the work elsewhere
                 threading.Thread(target=self._enter_safely, args=(link, side, pos), daemon=True).start()
-        mouse.Listener(on_move=on_move).start()
+
+        if LINUX:
+            # One permanent pair of watch-only listeners, for the life of the app.
+            def lin_move(x, y):
+                if self.remote:
+                    self._g_move(x, y)
+                else:
+                    on_move(x, y)
+
+            def lin_click(x, y, button, pressed):
+                if self.remote:
+                    self._g_click(x, y, button, pressed)
+
+            def lin_scroll(x, y, dx, dy):
+                if self.remote:
+                    self._g_scroll(x, y, dx, dy)
+
+            def lin_press(key):
+                if self.remote:
+                    self._g_press(key)
+
+            def lin_release(key):
+                if self.remote:
+                    self._g_release(key)
+            self._watchers = [mouse.Listener(on_move=lin_move, on_click=lin_click, on_scroll=lin_scroll),
+                              keyboard.Listener(on_press=lin_press, on_release=lin_release)]
+            for w in self._watchers:
+                w.start()
+        else:
+            mouse.Listener(on_move=on_move).start()
 
     # ---- driving another machine ----
     def _enter_safely(self, link, side, pos):
@@ -296,13 +390,20 @@ class AirShare(Mesh):
         link.send({"type": "kvm_enter", "from": OPPOSITE[side], "pos": pos})
         self._centre = (bx + bw // 2, by + bh // 2)
         self.mouse.position = self._centre
+        if LINUX:
+            if not self.xgrab.grab():
+                log("couldn't take the keyboard and pointer (another app has them): not crossing")
+                self.remote = None
+                link.send({"type": "kvm_leave_now"})
+                return
+        else:
+            self._grabs = [
+                mouse.Listener(on_move=self._g_move, on_click=self._g_click, on_scroll=self._g_scroll, suppress=True),
+                keyboard.Listener(on_press=self._g_press, on_release=self._g_release, suppress=True),
+            ]
+            for g in self._grabs:
+                g.start()
         self.cursor.hide()
-        self._grabs = [
-            mouse.Listener(on_move=self._g_move, on_click=self._g_click, on_scroll=self._g_scroll, suppress=True),
-            keyboard.Listener(on_press=self._g_press, on_release=self._g_release, suppress=True),
-        ]
-        for g in self._grabs:
-            g.start()
         threading.Thread(target=self._flush_loop, daemon=True).start()
         log(f"now controlling {self.neighbour(side)}")
         self.refresh_ui()
@@ -312,6 +413,8 @@ class AirShare(Mesh):
             return
         link, side = self.remote
         self.remote = None
+        if self.xgrab:
+            self.xgrab.release()
         for g in self._grabs:
             g.stop()
         self._grabs = []
@@ -360,7 +463,7 @@ class AirShare(Mesh):
                 log("the other machine went quiet (asleep, locked or gone): taking control back")
                 threading.Thread(target=self.leave_remote, daemon=True).start()
                 return
-            if any(not g.running for g in self._grabs):
+            if any(not g.running for g in self._grabs + self._watchers):
                 log("input capture stopped unexpectedly: taking control back")
                 threading.Thread(target=self.leave_remote, daemon=True).start()
                 return
@@ -495,6 +598,11 @@ class AirShare(Mesh):
                     self._held_keys.pop(ident, None)
             except Exception as exc:
                 log(f"couldn't type {header.get('key')}: {exc}")
+        elif t == "kvm_leave_now":
+            if self.driven_by and self.driven_by[0] is link:
+                self._release_all()
+                self.driven_by = None
+                self.refresh_ui()
         elif t == "kvm_leave":
             if self.remote and self.remote[0] is link:
                 self.leave_remote(float(header.get("pos", header.get("y", 0.5))))
