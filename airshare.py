@@ -28,10 +28,10 @@ from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from clickboard_core import MIN_PASSPHRASE, Config, Mesh, log, set_app
+from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -192,6 +192,33 @@ class XGrabber:
         self.grabbed = False
 
 
+_WIN_INPUT = None
+
+
+def win_move_abs(x, y):
+    """Windows: move the pointer the way a real mouse does (SendInput), so Windows treats it
+    as mouse activity and shows the pointer even on a machine with no mouse attached."""
+    global _WIN_INPUT
+    import ctypes
+    if _WIN_INPUT is None:
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
+                        ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong), ("mi", MOUSEINPUT)]
+        _WIN_INPUT = INPUT
+    u = ctypes.windll.user32
+    vx, vy, vw, vh = (u.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+    inp = _WIN_INPUT()
+    inp.type = 0                                            # INPUT_MOUSE
+    inp.mi.dx = int((x - vx) * 65535 / max(vw - 1, 1))
+    inp.mi.dy = int((y - vy) * 65535 / max(vh - 1, 1))
+    inp.mi.dwFlags = 0x0001 | 0x8000 | 0x4000               # MOVE | ABSOLUTE | VIRTUALDESK
+    u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_WIN_INPUT))
+
+
 def key_to_wire(key):
     if isinstance(key, keyboard.Key):
         return {"name": key.name}
@@ -222,17 +249,22 @@ class Bridge(QObject):
     open_settings = Signal()
 
 
-class AirShare(Mesh):
+class AirShare(ClipboardSync, Mesh):
     """One MAIN computer captures its keyboard and mouse and drives the others.
 
     The main computer keeps a virtual pointer for whichever screen is active and
     decides every crossing itself, sending absolute positions. The other computers
     install no input hooks at all: they report their screen size, and move, click
     and type as told. (The same shape Synergy uses, for the same reasons.)
+
+    Clipboard, images and files are shared between all machines too, via
+    ClipboardSync from clickboard_core.
     """
 
     def __init__(self, layout: dict, bridge: Bridge):
         Mesh.__init__(self, Config.load(), service="airshare")
+        self.init_clipboard()
+        self.cfg.paused = False
         self.layout = layout            # {"cells": {name: [r, c]}, "master": name, "version": t}
         self.bridge = bridge
         self.bounds = screen_bounds()
@@ -598,6 +630,9 @@ class AirShare(Mesh):
     # ---- frames from other machines ----
     def on_frame(self, link, header, payload):
         t = header.get("type")
+        if t in ClipboardSync.CLIP_FRAMES:
+            ClipboardSync.on_frame(self, link, header, payload)
+            return
         bx, by, bw, bh = self.bounds
         if t == "screen":
             name = self.peers.get(link.peer_id, {}).get("name") or str(header.get("name", ""))
@@ -635,7 +670,14 @@ class AirShare(Mesh):
                 self.driven_by = None
                 self.refresh_ui()
         elif t == "kvm_pos" and self.driven_by is link:
-            self.mouse.position = (bx + int(header.get("x", 0)), by + int(header.get("y", 0)))
+            x, y = bx + int(header.get("x", 0)), by + int(header.get("y", 0))
+            if WINDOWS:
+                try:
+                    win_move_abs(x, y)
+                    return
+                except Exception as exc:
+                    log(f"real-mouse move failed, placing the pointer instead: {exc}")
+            self.mouse.position = (x, y)
         elif t == "kvm_btn" and self.driven_by is link:
             btn = getattr(mouse.Button, str(header.get("button")), None)
             if btn:
@@ -710,6 +752,7 @@ class AirShare(Mesh):
 
     def toggle_pause(self):
         self.paused = not self.paused
+        self.cfg.paused = self.paused              # ClipboardSync honours this too
         if self.paused:
             threading.Thread(target=self._home_safely, daemon=True).start()
         log("sharing paused" if self.paused else "sharing resumed")
@@ -1097,6 +1140,7 @@ def main():
     app.apply_role()
     threading.Thread(target=app.control_loop, daemon=True).start()
     threading.Thread(target=app.layout_loop, daemon=True).start()
+    threading.Thread(target=app.watch_clipboard, daemon=True).start()
     tray = Tray(app, qapp)
     log(f"AirShare {VERSION} as '{app.cfg.name}', screen {app.bounds[2]}x{app.bounds[3]}")
     if not app._local_key or not app.cells() or not app.master():

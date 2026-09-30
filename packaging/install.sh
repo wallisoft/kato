@@ -19,7 +19,7 @@ echo "==> Installing AirShare into $DEST"
 
 if command -v apt-get >/dev/null 2>&1; then
     MISSING=()
-    for p in libxcb-cursor0 libnotify-bin; do
+    for p in libxcb-cursor0 libnotify-bin xclip wl-clipboard; do
         dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || MISSING+=("$p")
     done
     if [ ${#MISSING[@]} -gt 0 ]; then
