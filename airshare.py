@@ -31,13 +31,13 @@ import time
 from pynput import keyboard, mouse
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
-                               QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+                               QMessageBox, QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -257,6 +257,23 @@ def win_move_abs(x, y):
     u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_WIN_INPUT))
 
 
+def win_cursor_hidden():
+    """Windows: True when Windows isn't showing its pointer (typically: no mouse attached)."""
+    import ctypes
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class CURSORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_ulong), ("flags", ctypes.c_ulong),
+                    ("hCursor", ctypes.c_void_p), ("pt", POINT)]
+    ci = CURSORINFO()
+    ci.cbSize = ctypes.sizeof(CURSORINFO)
+    if not ctypes.windll.user32.GetCursorInfo(ctypes.byref(ci)):
+        return False
+    return not (ci.flags & 0x1)                             # CURSOR_SHOWING
+
+
 def key_to_wire(key):
     if isinstance(key, keyboard.Key):
         return {"name": key.name}
@@ -285,6 +302,7 @@ class Bridge(QObject):
     refresh = Signal()
     notify = Signal(str)
     open_settings = Signal()
+    pointer = Signal(int, int, bool)    # stand-in pointer: x, y (screen pixels), show
 
 
 class AirShare(ClipboardSync, Mesh):
@@ -312,6 +330,7 @@ class AirShare(ClipboardSync, Mesh):
         self.paused = False
         self.sizes = {}                 # machine name -> (w, h), as reported by each machine
         self.versions = {}              # machine name -> AirShare version it reports
+        self._stand_in = False          # Windows: our own pointer is showing (Windows hid its own)
         self.latest = None              # newest release on GitHub, once checked
         # main-computer state
         self.active = None              # name of the machine being driven, or None when at home
@@ -719,6 +738,10 @@ class AirShare(ClipboardSync, Mesh):
             if WINDOWS:
                 try:
                     win_move_abs(x, y)
+                    hidden = win_cursor_hidden()
+                    if hidden or self._stand_in:
+                        self.bridge.pointer.emit(x, y, hidden)
+                        self._stand_in = hidden
                     return
                 except Exception as exc:
                     log(f"real-mouse move failed, placing the pointer instead: {exc}")
@@ -899,8 +922,8 @@ def dot_icon(colour: QColor) -> QIcon:
 
 
 class GridWidget(QWidget):
-    """A 3x3 grid of cells; machines are tiles you drag into place. Unplaced ones wait below."""
-    CELL_W, CELL_H, GAP = 120, 76, 10    # 4x4 grid stays laptop-sized
+    """A GRID x GRID grid of cells; machines are tiles you drag into place. Unplaced ones wait below."""
+    CELL_W, CELL_H, GAP = 120, 62, 8     # compact, so the window fits a 768-pixel laptop screen
 
     def __init__(self, me: str):
         super().__init__()
@@ -911,7 +934,7 @@ class GridWidget(QWidget):
         self.drag_pos = QPoint()
         self.connected = set()
         w = GRID * self.CELL_W + (GRID + 1) * self.GAP
-        self.setMinimumSize(w, GRID * self.CELL_H + (GRID + 1) * self.GAP + self.CELL_H + 40)
+        self.setMinimumSize(w, GRID * self.CELL_H + (GRID + 1) * self.GAP + 26 + self.CELL_H + self.GAP)
         self.setMouseTracking(True)
 
     def set_machines(self, names, cells, connected):
@@ -926,7 +949,7 @@ class GridWidget(QWidget):
                      self.CELL_W, self.CELL_H)
 
     def pool_rect(self, i):
-        top = self.GAP + GRID * (self.CELL_H + self.GAP) + 30
+        top = self.GAP + GRID * (self.CELL_H + self.GAP) + 26
         return QRect(self.GAP + i * (self.CELL_W + self.GAP), top, self.CELL_W, self.CELL_H)
 
     def tile_rect(self, name):
@@ -979,14 +1002,17 @@ class GridWidget(QWidget):
         f = QFont(self.font())
         f.setBold(True)
         p.setFont(f)
-        p.drawText(rect.adjusted(6, 6, -6, -24), Qt.AlignCenter | Qt.TextWordWrap, name)
+        fm = p.fontMetrics()
+        p.drawText(rect.adjusted(8, 6, -8, -22), Qt.AlignCenter, fm.elidedText(name, Qt.ElideRight, rect.width() - 16))
         f.setBold(False)
         f.setPointSizeF(max(f.pointSizeF() - 1.5, 7))
         p.setFont(f)
         label = "this machine" if mine else ("connected" if name in self.connected else "not connected")
         if name == getattr(self, "master", None):
-            label = "main · " + label
-        p.drawText(rect.adjusted(6, 0, -6, -10), Qt.AlignHCenter | Qt.AlignBottom, label)
+            label = "main · " + ("this one" if mine else label)
+        fm = p.fontMetrics()
+        p.drawText(rect.adjusted(8, 0, -8, -9), Qt.AlignHCenter | Qt.AlignBottom,
+                   fm.elidedText(label, Qt.ElideRight, rect.width() - 16))
         p.setFont(self.font())
 
     # dragging
@@ -1033,7 +1059,17 @@ class SettingsWindow(QWidget):
         super().__init__()
         self.app = app
         self.setWindowTitle("AirShare - layout and settings")
-        v = QVBoxLayout(self)
+        body = QWidget()
+        v = QVBoxLayout(body)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidget(body)
+        outer.addWidget(self.scroll)
+        self.body = body
         title = QLabel("Layout")
         f = title.font()
         f.setPointSizeF(f.pointSizeF() + 3)
@@ -1107,6 +1143,14 @@ class SettingsWindow(QWidget):
         self.show_version()
         self.status.setText(self.app.status_line())
 
+    def fit_to_screen(self):
+        """Open at the size the content wants, but never taller than the screen (it scrolls instead)."""
+        want = self.body.sizeHint()
+        avail = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        w = min(want.width() + self.scroll.verticalScrollBar().sizeHint().width() + 4, avail.width() - 40)
+        h = min(want.height() + 4, avail.height() - 60)
+        self.resize(max(w, 420), max(h, 300))
+
     def show_version(self):
         a = self.app
         kind = {"store": "Microsoft Store", "windows": "Windows installer", "linux": "Linux",
@@ -1151,6 +1195,45 @@ class SettingsWindow(QWidget):
         self.status.setText("Saved, and shared with your other machines.")
 
 
+class StandInPointer(QWidget):
+    """Windows hides its pointer on a PC with no mouse attached. While another machine drives
+    this one, AirShare draws its own arrow there instead: always on top, click-through,
+    never takes focus. No driver, no dongle."""
+    SIZE = 26
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+                         | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.resize(self.SIZE, self.SIZE)
+
+    def paintEvent(self, _):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPolygonF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        arrow = QPolygonF([QPointF(x, y) for x, y in
+                           ((1.5, 1.5), (1.5, 19), (6, 14.5), (9.5, 22), (13, 20.5), (9.5, 13.5), (15.5, 13.5))])
+        p.setPen(QPen(Qt.white, 1.6))
+        p.setBrush(Qt.black)
+        p.drawPolygon(arrow)
+        p.end()
+
+    def place(self, x, y, show):
+        if not show:
+            self.hide()
+            return
+        if not self.isVisible():
+            self.show()
+        try:
+            import ctypes
+            # screen pixels, topmost, no resize, never activate
+            ctypes.windll.user32.SetWindowPos(int(self.winId()), -1, int(x), int(y), 0, 0, 0x0001 | 0x0010)
+        except Exception:
+            self.move(int(x), int(y))
+
+
 class Tray:
     def __init__(self, app: AirShare, qapp: QApplication):
         self.app, self.qapp = app, qapp
@@ -1162,6 +1245,10 @@ class Tray:
         app.bridge.refresh.connect(self.refresh)
         app.bridge.notify.connect(lambda m: self.icon.showMessage("AirShare", m, QSystemTrayIcon.Information, 6000))
         app.bridge.open_settings.connect(self.open_settings)
+        self.stand_in = None
+        if WINDOWS:
+            self.stand_in = StandInPointer()
+            app.bridge.pointer.connect(self.stand_in.place)
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
         self.timer.start(2000)
@@ -1174,6 +1261,9 @@ class Tray:
 
     def refresh(self):
         a = self.app
+        if self.stand_in and a.driven_by is None and self.stand_in.isVisible():
+            self.stand_in.hide()
+            a._stand_in = False
         self.icon.setIcon(dot_icon(a.colour()))
         self.icon.setToolTip(f"AirShare - {a.status_line()}")
         self.menu.clear()
@@ -1212,6 +1302,7 @@ class Tray:
             self.settings = SettingsWindow(self.app)
         else:
             self.settings.reload()
+        self.settings.fit_to_screen()
         self.settings.show()
         self.settings.raise_()
         self.settings.activateWindow()
