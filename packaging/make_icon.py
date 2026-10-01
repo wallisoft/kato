@@ -1,11 +1,22 @@
-"""Draw AirShare's icon (a blue dot) as .ico or .png, depending on the file name given."""
-import sys
-from PIL import Image, ImageDraw
+"""AirShare's app icon, from the committed artwork in packaging/art.
 
+  make_icon.py out.ico          the Windows icon (chevron at 16-64 px, full art at 128-256)
+  make_icon.py out.png [size]   a PNG at that size (default 512): chevron at 64 px and
+                                below, full artwork above. Used for the Linux menu icon
+                                and the Store tiles.
+
+The tray icon is separate: a coloured status dot drawn by the app itself."""
+import shutil
+import sys
+from pathlib import Path
+
+from PIL import Image
+
+art = Path(__file__).resolve().parent / "art"
 out = sys.argv[1]
-im = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
-ImageDraw.Draw(im).ellipse((24, 24, 232, 232), fill=(59, 130, 246, 255), outline=(255, 255, 255, 220), width=12)
 if out.endswith(".ico"):
-    im.save(out, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    shutil.copy(art / "airshare.ico", out)
 else:
-    im.save(out)
+    size = int(sys.argv[2]) if len(sys.argv) > 2 else 512
+    src = art / ("airshare-small-512.png" if size <= 64 else "airshare-512.png")
+    Image.open(src).resize((size, size), Image.LANCZOS).save(out)

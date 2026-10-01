@@ -65,8 +65,9 @@ jobs:
           New-Item -ItemType Directory -Force msix\Assets | Out-Null
           Copy-Item build\airshare.dist\* msix\ -Recurse
           Copy-Item packaging\THIRD-PARTY-NOTICES.txt msix\
-          python packaging/make_icon.py msix/Assets/Square150x150Logo.png
-          python -c "from PIL import Image; im=Image.open('msix/Assets/Square150x150Logo.png'); [im.resize((s,s)).save('msix/Assets/'+n) for n,s in (('Square150x150Logo.png',150),('Square44x44Logo.png',44),('StoreLogo.png',50))]"
+          python packaging/make_icon.py msix/Assets/Square150x150Logo.png 150
+          python packaging/make_icon.py msix/Assets/Square44x44Logo.png 44
+          python packaging/make_icon.py msix/Assets/StoreLogo.png 50
           (Get-Content packaging\AppxManifest.xml -Raw) `
             -replace '@VERSION@', $ver `
             -replace '@IDENTITY_NAME@', $env:ID_NAME `
