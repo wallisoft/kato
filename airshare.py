@@ -14,6 +14,12 @@ from clickboard_core (passphrase mode for now).
 """
 import argparse
 import json
+import os
+import re
+import subprocess
+import tempfile
+import urllib.request
+import webbrowser
 import platform
 import queue
 import secrets
@@ -31,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, 
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -40,11 +46,43 @@ RETURN_KEY = keyboard.Key.scroll_lock
 ESCAPE_PRESSES, ESCAPE_WINDOW = 3, 1.2
 ALIVE_EVERY, ALIVE_TIMEOUT = 1.0, 3.0
 LAYOUT_EVERY = 5                      # re-share layout and screen size so late joiners pick them up
-GRID = 3
+GRID = 4
 OPPOSITE = {"left": "right", "right": "left", "up": "down", "down": "up"}
 STEP = {"left": (0, -1), "right": (0, 1), "up": (-1, 0), "down": (1, 0)}
 
 GREEN, BLUE, ORANGE = QColor(34, 197, 94), QColor(59, 130, 246), QColor(249, 115, 22)
+
+RELEASES_API = "https://api.github.com/repos/wallisoft/airshare-releases/releases/latest"
+SETUP_URL = "https://github.com/wallisoft/airshare-releases/releases/latest/download/AirShare-Setup.exe"
+LINUX_INSTALL = "curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash"
+STORE_URL = "ms-windows-store://downloadsandupdates"     # the Store's own updates page
+WEBSITE = "https://airshare.eur.bz/#download"
+UPDATE_CHECK_EVERY = 6 * 3600
+
+
+def install_kind():
+    """How this copy was installed: store, windows, linux, or source."""
+    if "__compiled__" not in globals():
+        return "source"
+    if "windowsapps" in sys.executable.lower():
+        return "store"
+    return "windows" if platform.system() == "Windows" else "linux"
+
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
+
+
+def latest_version():
+    try:
+        req = urllib.request.Request(RELEASES_API, headers={"User-Agent": f"AirShare/{VERSION}",
+                                                           "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read()).get("tag_name", "").lstrip("v") or None
+    except Exception as exc:
+        log(f"update check failed: {exc}")
+        return None
+
 
 WORDS = ("amber", "anchor", "apple", "badger", "banjo", "beacon", "bramble", "cactus", "castle", "cobalt",
          "comet", "copper", "dingo", "ember", "falcon", "fern", "garnet", "harbour", "hazel", "island",
@@ -273,6 +311,8 @@ class AirShare(ClipboardSync, Mesh):
         self.cursor = CursorHider()
         self.paused = False
         self.sizes = {}                 # machine name -> (w, h), as reported by each machine
+        self.versions = {}              # machine name -> AirShare version it reports
+        self.latest = None              # newest release on GitHub, once checked
         # main-computer state
         self.active = None              # name of the machine being driven, or None when at home
         self.vpos = [0, 0]              # virtual pointer on the active machine's screen
@@ -368,7 +408,7 @@ class AirShare(ClipboardSync, Mesh):
         bx, by, bw, bh = self.bounds
         for link in list(self.links.values()):
             if link.alive:
-                self._send(link, {"type": "screen", "name": self.cfg.name, "w": bw, "h": bh})
+                self._send(link, {"type": "screen", "name": self.cfg.name, "w": bw, "h": bh, "version": VERSION})
                 if self.cells():
                     self._send(link, {"type": "layout", "layout": self.layout})
 
@@ -642,6 +682,7 @@ class AirShare(ClipboardSync, Mesh):
             name = self.peers.get(link.peer_id, {}).get("name") or str(header.get("name", ""))
             if name:
                 self.sizes[name] = (int(header.get("w", 1920)), int(header.get("h", 1080)))
+                self.versions[name] = str(header.get("version", "old"))
         elif t == "layout":
             theirs = header.get("layout") or {}
             if float(theirs.get("version", 0)) > float(self.layout.get("version", 0)):
@@ -746,10 +787,61 @@ class AirShare(ClipboardSync, Mesh):
         n = self.connected_count()
         if not n:
             return "Looking for your other machines..."
+        behind = self.out_of_date()
+        if behind:
+            return "Update needed on: " + ", ".join(behind)
         if not self.kvm_on():
             return f"Clipboard sharing - {n} machine{'s' if n != 1 else ''} connected"
         role = "Main computer" if self.is_master() else f"Main computer: {self.master()}"
         return f"{role} - {n} machine{'s' if n != 1 else ''} connected"
+
+    def connected_names(self):
+        return [p["name"] for pid, p in self.peers.items() if self.links.get(pid) and self.links[pid].alive]
+
+    def out_of_date(self):
+        """Connected machines running a different AirShare version from the newest one in the group."""
+        names = self.connected_names()
+        everyone = {self.cfg.name: VERSION, **{n: self.versions.get(n, "old") for n in names}}
+        newest = max(everyone.values(), key=vtuple)
+        return sorted(n for n, v in everyone.items() if vtuple(v) < vtuple(newest))
+
+    def update_available(self):
+        return bool(self.latest) and vtuple(self.latest) > vtuple(VERSION)
+
+    def update_loop(self):
+        while self.running:
+            v = latest_version()
+            if v:
+                self.latest = v
+                if self.update_available():
+                    log(f"update available: {v}")
+                self.refresh_ui()
+            time.sleep(UPDATE_CHECK_EVERY)
+
+    def upgrade(self):
+        kind = install_kind()
+        log(f"upgrade requested ({kind} install)")
+        if kind == "store":
+            webbrowser.open(STORE_URL)
+        elif kind == "windows":
+            try:
+                path = os.path.join(tempfile.gettempdir(), "AirShare-Setup.exe")
+                urllib.request.urlretrieve(SETUP_URL, path)
+                os.startfile(path)                     # the installer closes this copy and replaces it
+            except Exception as exc:
+                self.notify(f"Couldn't download the update ({exc}). Opening the website instead.")
+                webbrowser.open(WEBSITE)
+        elif kind == "linux":
+            cmd = LINUX_INSTALL + "; echo; read -p 'Done. Press Enter to close.'"
+            for term in (["x-terminal-emulator", "-e"], ["gnome-terminal", "--"], ["konsole", "-e"], ["xterm", "-e"]):
+                try:
+                    subprocess.Popen(term + ["bash", "-c", cmd])
+                    return
+                except FileNotFoundError:
+                    continue
+            webbrowser.open(WEBSITE)
+        else:
+            webbrowser.open(WEBSITE)
 
     def colour(self):
         if self.paused or not self.connected_count():
@@ -808,7 +900,7 @@ def dot_icon(colour: QColor) -> QIcon:
 
 class GridWidget(QWidget):
     """A 3x3 grid of cells; machines are tiles you drag into place. Unplaced ones wait below."""
-    CELL_W, CELL_H, GAP = 132, 84, 10
+    CELL_W, CELL_H, GAP = 120, 76, 10    # 4x4 grid stays laptop-sized
 
     def __init__(self, me: str):
         super().__init__()
@@ -974,6 +1066,13 @@ class SettingsWindow(QWidget):
         row.addWidget(gen)
         v.addLayout(row)
 
+        vrow = QHBoxLayout()
+        self.version_label = QLabel()
+        self.upgrade_btn = QPushButton("Upgrade")
+        self.upgrade_btn.clicked.connect(self.app.upgrade)
+        vrow.addWidget(self.version_label, 1)
+        vrow.addWidget(self.upgrade_btn)
+        v.addLayout(vrow)
         self.status = QLabel()
         self.status.setWordWrap(True)
         v.addWidget(self.status)
@@ -1005,10 +1104,21 @@ class SettingsWindow(QWidget):
         self.kvm_box.setChecked(self.app.kvm_on())
         self.master_box.setEnabled(self.app.kvm_on())
         self._dirty_names = self.names()
+        self.show_version()
         self.status.setText(self.app.status_line())
+
+    def show_version(self):
+        a = self.app
+        kind = {"store": "Microsoft Store", "windows": "Windows installer", "linux": "Linux",
+                "source": "running from source"}[install_kind()]
+        latest = a.latest or "checking..."
+        self.version_label.setText(f"This machine: <b>{VERSION}</b> ({kind}) \u00b7 Latest: <b>{latest}</b>")
+        self.upgrade_btn.setVisible(a.update_available())
+        self.upgrade_btn.setText("Open the Store" if install_kind() == "store" else f"Upgrade to {a.latest}")
 
     def tick(self):
         """Keep status fresh; add newly seen machines to the pool without disturbing edits."""
+        self.show_version()
         self.status.setText(self.app.status_line())
         names = self.names()
         if names != self._dirty_names:
@@ -1078,10 +1188,16 @@ class Tray:
             name = a.neighbour(side)
             if name:
                 mark = "\u25cf" if a.link_for(side) else "\u25cb"
-                n = QAction(f"{mark} {name} ({'above' if side == 'up' else 'below' if side == 'down' else side})", self.menu)
+                ver = a.versions.get(name)
+                n = QAction(f"{mark} {name} ({'above' if side == 'up' else 'below' if side == 'down' else side})"
+                            + (f" \u00b7 {ver}" if ver else ""), self.menu)
                 n.setEnabled(False)
                 self.menu.addAction(n)
         self.menu.addSeparator()
+        if a.update_available():
+            up = QAction(f"Update available: {a.latest}...", self.menu)
+            up.triggered.connect(a.upgrade)
+            self.menu.addAction(up)
         lay = QAction("Layout and settings...", self.menu)
         lay.triggered.connect(self.open_settings)
         self.menu.addAction(lay)
@@ -1153,6 +1269,7 @@ def main():
     threading.Thread(target=app.control_loop, daemon=True).start()
     threading.Thread(target=app.layout_loop, daemon=True).start()
     threading.Thread(target=app.watch_clipboard, daemon=True).start()
+    threading.Thread(target=app.update_loop, daemon=True).start()
     tray = Tray(app, qapp)
     log(f"AirShare {VERSION} as '{app.cfg.name}', screen {app.bounds[2]}x{app.bounds[3]}")
     if not app._local_key or not app.cells() or not app.master():
