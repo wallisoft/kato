@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -255,6 +255,98 @@ def win_move_abs(x, y):
     inp.mi.dy = int((y - vy) * 65535 / max(vh - 1, 1))
     inp.mi.dwFlags = 0x0001 | 0x8000 | 0x4000               # MOVE | ABSOLUTE | VIRTUALDESK
     u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_WIN_INPUT))
+
+
+class StartupSequences:
+    """X11 (GNOME on Xorg): when you click AirShare's tray menu, GNOME starts a "launching"
+    sequence (the spinning pointer) and waits to be told the app's window has arrived. Qt
+    doesn't report back on X11, so the spinner lingers. We listen for those announcements
+    on the root window and complete any that are about AirShare once our window is up."""
+
+    def __init__(self):
+        self.pending = set()
+        self._parts = {}
+        self._lock = threading.Lock()
+        self.d = None
+        if platform.system() != "Linux" or not os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+            return
+        try:
+            from Xlib import X, display
+            self.X = X
+            self.d = display.Display()
+            self.root = self.d.screen().root
+            self.a_begin = self.d.intern_atom("_NET_STARTUP_INFO_BEGIN")
+            self.a_more = self.d.intern_atom("_NET_STARTUP_INFO")
+            self.sender = self.root.create_window(-10, -10, 1, 1, 0, X.CopyFromParent, override_redirect=True)
+            listen = display.Display()
+            listen.screen().root.change_attributes(event_mask=X.PropertyChangeMask)
+            threading.Thread(target=self._listen, args=(listen,), daemon=True).start()
+        except Exception as exc:
+            log(f"startup notification helper unavailable: {exc}")
+            self.d = None
+
+    def _listen(self, listen):
+        while True:
+            try:
+                ev = listen.next_event()
+            except Exception:
+                return
+            if ev.type != self.X.ClientMessage or ev.client_type not in (self.a_begin, self.a_more):
+                continue
+            key = ev.window.id
+            chunk = bytes(ev.data[1])
+            buf = (b"" if ev.client_type == self.a_begin else self._parts.get(key, b"")) + chunk
+            if b"\0" not in buf:
+                self._parts[key] = buf
+                continue
+            self._parts.pop(key, None)
+            msg = buf.split(b"\0", 1)[0].decode(errors="ignore")
+            if msg.startswith("new:") and "airshare" in msg.lower():
+                m = re.search(r'ID=("(?:[^"\\]|\\.)*"|\S+)', msg)
+                if m:
+                    with self._lock:
+                        self.pending.add(m.group(1).strip('"'))
+                    log("startup sequence seen: " + m.group(1)[:60])
+
+    def complete(self):
+        """Tell the window manager every AirShare launch sequence is finished."""
+        if not self.d:
+            return
+        with self._lock:
+            ids, self.pending = list(self.pending), set()
+        for sid in ids:
+            try:
+                from Xlib.protocol import event
+                data = ('remove: ID="' + sid.replace("\\", "\\\\").replace('"', '\\"') + '"').encode() + b"\0"
+                for i in range(0, len(data), 20):
+                    chunk = data[i:i + 20].ljust(20, b"\0")
+                    ev = event.ClientMessage(window=self.sender, client_type=self.a_begin if i == 0 else self.a_more,
+                                             data=(8, chunk))
+                    self.root.send_event(ev, event_mask=self.X.PropertyChangeMask)
+                self.d.flush()
+                log("startup sequence completed: " + sid[:60])
+            except Exception as exc:
+                log(f"couldn't complete startup sequence: {exc}")
+
+
+def x11_activate(win_id):
+    """Ask the window manager to bring a window to the front the way a taskbar does,
+    which GNOME honours (a plain raise from the app gets 'is ready' and stays behind)."""
+    if platform.system() != "Linux" or not os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return
+    try:
+        from Xlib import X, display
+        from Xlib.protocol import event
+        d = display.Display()
+        root = d.screen().root
+        ev = event.ClientMessage(window=d.create_resource_object("window", int(win_id)),
+                                 client_type=d.intern_atom("_NET_ACTIVE_WINDOW"),
+                                 data=(32, [2, X.CurrentTime, 0, 0, 0]))     # 2 = request from a pager/taskbar
+        root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+        d.flush()
+        d.close()
+    except Exception as exc:
+        log(f"couldn't bring the window to the front: {exc}")
 
 
 def win_cursor_hidden():
@@ -1245,6 +1337,7 @@ class Tray:
         app.bridge.refresh.connect(self.refresh)
         app.bridge.notify.connect(lambda m: self.icon.showMessage("AirShare", m, QSystemTrayIcon.Information, 6000))
         app.bridge.open_settings.connect(self.open_settings)
+        self.startup = StartupSequences()
         self.stand_in = None
         if WINDOWS:
             self.stand_in = StandInPointer()
@@ -1306,6 +1399,11 @@ class Tray:
         self.settings.show()
         self.settings.raise_()
         self.settings.activateWindow()
+        x11_activate(self.settings.winId())
+        # GNOME's tray starts a "launching" spinner when its menu opens a window; finish it,
+        # now and again shortly after in case the announcement arrives a moment late.
+        self.startup.complete()
+        QTimer.singleShot(1500, self.startup.complete)
 
     def quit(self):
         self.app.leave_remote()
