@@ -25,13 +25,13 @@ import time
 from pynput import keyboard, mouse
 from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -330,6 +330,9 @@ class AirShare(ClipboardSync, Mesh):
     def is_master(self):
         return self.master() == self.cfg.name
 
+    def kvm_on(self):
+        return self.layout.get("kvm", True)
+
     def neighbour_of(self, name, side):
         pos = self.cells().get(name)
         if not pos:
@@ -350,8 +353,8 @@ class AirShare(ClipboardSync, Mesh):
     def link_for(self, side):
         return self.link_to(self.neighbour(side))
 
-    def set_layout(self, cells, master, share=True):
-        self.layout = {"cells": cells, "master": master, "version": time.time()}
+    def set_layout(self, cells, master, kvm=True, share=True):
+        self.layout = {"cells": cells, "master": master, "kvm": bool(kvm), "version": time.time()}
         self._save_layout()
         self.apply_role()
         if share:
@@ -376,14 +379,15 @@ class AirShare(ClipboardSync, Mesh):
 
     def apply_role(self):
         """Only the main computer listens to input. The others install no hooks at all."""
-        if self.is_master() and not self._input_on:
+        want = self.is_master() and self.kvm_on()
+        if want and not self._input_on:
             self._start_input()
-        elif not self.is_master() and self._input_on:
+        elif not want and self._input_on:
             self.go_home()
             for w in self._watchers:
                 w.stop()
             self._watchers, self._input_on = [], False
-            log("not the main computer: input listening off")
+            log("keyboard and mouse sharing off here: input listening off")
 
     # ---- main computer: listening ----
     def _start_input(self):
@@ -642,7 +646,7 @@ class AirShare(ClipboardSync, Mesh):
             theirs = header.get("layout") or {}
             if float(theirs.get("version", 0)) > float(self.layout.get("version", 0)):
                 self.layout = {"cells": dict(theirs.get("cells", {})), "master": theirs.get("master"),
-                               "version": float(theirs["version"])}
+                               "kvm": bool(theirs.get("kvm", True)), "version": float(theirs["version"])}
                 self._save_layout()
                 log(f"layout updated by another machine (main computer: {self.master()})")
                 self.apply_role()
@@ -742,6 +746,8 @@ class AirShare(ClipboardSync, Mesh):
         n = self.connected_count()
         if not n:
             return "Looking for your other machines..."
+        if not self.kvm_on():
+            return f"Clipboard sharing - {n} machine{'s' if n != 1 else ''} connected"
         role = "Main computer" if self.is_master() else f"Main computer: {self.master()}"
         return f"{role} - {n} machine{'s' if n != 1 else ''} connected"
 
@@ -949,11 +955,14 @@ class SettingsWindow(QWidget):
         v.addWidget(hint)
         self.grid = GridWidget(app.cfg.name)
         v.addWidget(self.grid)
+        self.kvm_box = QCheckBox("Share keyboard and mouse (untick to share only the clipboard, images and files)")
+        v.addWidget(self.kvm_box)
         mrow = QHBoxLayout()
         mrow.addWidget(QLabel("<b>Main computer</b> (its keyboard and mouse control the others):"))
         self.master_box = QComboBox()
         mrow.addWidget(self.master_box, 1)
         v.addLayout(mrow)
+        self.kvm_box.toggled.connect(lambda on: self.master_box.setEnabled(on))
 
         v.addSpacing(8)
         v.addWidget(QLabel(f"<b>Shared passphrase</b> (the same on every machine, {MIN_PASSPHRASE}+ characters)"))
@@ -993,6 +1002,8 @@ class SettingsWindow(QWidget):
         self.master_box.clear()
         self.master_box.addItems(self.names())
         self.master_box.setCurrentText(self.app.master() or self.app.cfg.name)
+        self.kvm_box.setChecked(self.app.kvm_on())
+        self.master_box.setEnabled(self.app.kvm_on())
         self._dirty_names = self.names()
         self.status.setText(self.app.status_line())
 
@@ -1021,7 +1032,7 @@ class SettingsWindow(QWidget):
         if master not in self.grid.cells:
             QMessageBox.warning(self, "AirShare", f"Place the main computer ({master}) in the grid too.")
             return
-        self.app.set_layout(dict(self.grid.cells), master)
+        self.app.set_layout(dict(self.grid.cells), master, self.kvm_box.isChecked())
         self.grid.master = master
         if passphrase != self.app.cfg.passphrase:
             self.app.cfg.mode, self.app.cfg.passphrase = "local", passphrase
@@ -1123,6 +1134,7 @@ def main():
     if "cells" not in layout:
         layout = {"cells": {}, "version": 0}      # older left/right layouts are replaced by the grid
     layout.setdefault("master", None)
+    layout.setdefault("kvm", True)
 
     qapp = QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)

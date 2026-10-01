@@ -54,10 +54,34 @@ jobs:
       - name: Build AirShare-Setup.exe
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ needs.check.outputs.version }}" packaging\airshare.iss
+      - name: Build AirShare.msix (Microsoft Store)
+        if: ${{ vars.MSIX_IDENTITY_NAME != '' }}
+        env:
+          ID_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+          PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
+          PUBLISHER_DISPLAY: ${{ vars.MSIX_PUBLISHER_DISPLAY }}
+        run: |
+          $ver = "${{ needs.check.outputs.version }}.0"
+          New-Item -ItemType Directory -Force msix\Assets | Out-Null
+          Copy-Item build\airshare.dist\* msix\ -Recurse
+          Copy-Item packaging\THIRD-PARTY-NOTICES.txt msix\
+          python packaging/make_icon.py msix/Assets/Square150x150Logo.png
+          python -c "from PIL import Image; im=Image.open('msix/Assets/Square150x150Logo.png'); [im.resize((s,s)).save('msix/Assets/'+n) for n,s in (('Square150x150Logo.png',150),('Square44x44Logo.png',44),('StoreLogo.png',50))]"
+          (Get-Content packaging\AppxManifest.xml -Raw) `
+            -replace '@VERSION@', $ver `
+            -replace '@IDENTITY_NAME@', $env:ID_NAME `
+            -replace '@PUBLISHER@', $env:PUBLISHER `
+            -replace '@PUBLISHER_DISPLAY@', $env:PUBLISHER_DISPLAY |
+            Set-Content msix\AppxManifest.xml -Encoding UTF8
+          $mk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $mk.FullName pack /d msix /p AirShare.msix /o
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: packaging/Output/AirShare-Setup.exe
+          if-no-files-found: ignore
+          path: |
+            packaging/Output/AirShare-Setup.exe
+            AirShare.msix
 
   linux:
     needs: check
@@ -117,3 +141,4 @@ jobs:
             **/AirShare-Setup.exe
             **/airshare-linux-x86_64.tar.gz
             **/install.sh
+            **/AirShare.msix
