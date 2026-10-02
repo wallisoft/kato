@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -1414,42 +1414,53 @@ class Tray:
             self.app.toggle_pause()
 
     def refresh(self):
+        """Runs every 2 s. Only touches the tray when something has actually changed, and never
+        rebuilds the menu while it's open: rebuilding unconditionally made it flicker."""
         a = self.app
         if self.stand_in and a.driven_by is None and self.stand_in.isVisible():
             self.stand_in.hide()
             a._stand_in = False
-        self.icon.setIcon(dot_icon(a.colour()))
-        self.icon.setToolTip(f"AirShare - {a.status_line()}")
-        self.menu.clear()
-        act = QAction("Resume sharing" if a.paused else "Pause sharing", self.menu)
-        act.triggered.connect(a.toggle_pause)
-        self.menu.addAction(act)
-        s = QAction(a.status_line(), self.menu)
-        s.setEnabled(False)
-        self.menu.addAction(s)
-        self.menu.addSeparator()
+        colour, tip = a.colour(), f"AirShare - {a.status_line()}"
+        if colour != getattr(self, "_colour", None):
+            self._colour = colour
+            self.icon.setIcon(dot_icon(colour))
+        if tip != getattr(self, "_tip", None):
+            self._tip = tip
+            self.icon.setToolTip(tip)
+        spec = self.menu_spec()
+        signature = [(kind, text, enabled) for kind, text, enabled, _ in spec]
+        if signature != getattr(self, "_menu_sig", None) and not self.menu.isVisible():
+            self._menu_sig = signature
+            self.menu.clear()
+            for kind, text, enabled, action in spec:
+                if kind == "sep":
+                    self.menu.addSeparator()
+                    continue
+                item = QAction(text, self.menu)
+                item.setEnabled(enabled)
+                if action:
+                    item.triggered.connect(action)
+                self.menu.addAction(item)
+        if self.settings and self.settings.isVisible():
+            self.settings.tick()
+
+    def menu_spec(self):
+        """What the tray menu should show right now: (kind, text, enabled, action)."""
+        a = self.app
+        spec = [("item", "Resume sharing" if a.paused else "Pause sharing", True, a.toggle_pause),
+                ("item", a.status_line(), False, None), ("sep", "", False, None)]
         for side in ("left", "right", "up", "down"):
             name = a.neighbour(side)
             if name:
                 mark = "\u25cf" if a.link_for(side) else "\u25cb"
                 ver = a.versions.get(name)
-                n = QAction(f"{mark} {name} ({'above' if side == 'up' else 'below' if side == 'down' else side})"
-                            + (f" \u00b7 {ver}" if ver else ""), self.menu)
-                n.setEnabled(False)
-                self.menu.addAction(n)
-        self.menu.addSeparator()
+                where = "above" if side == "up" else "below" if side == "down" else side
+                spec.append(("item", f"{mark} {name} ({where})" + (f" \u00b7 {ver}" if ver else ""), False, None))
+        spec.append(("sep", "", False, None))
         if a.update_available():
-            up = QAction(f"Update available: {a.latest}...", self.menu)
-            up.triggered.connect(a.upgrade)
-            self.menu.addAction(up)
-        lay = QAction("Layout and settings...", self.menu)
-        lay.triggered.connect(self.open_settings)
-        self.menu.addAction(lay)
-        q = QAction("Quit", self.menu)
-        q.triggered.connect(self.quit)
-        self.menu.addAction(q)
-        if self.settings and self.settings.isVisible():
-            self.settings.tick()
+            spec.append(("item", f"Update available: {a.latest}...", True, a.upgrade))
+        spec += [("item", "Layout and settings...", True, self.open_settings), ("item", "Quit", True, self.quit)]
+        return spec
 
     def open_settings(self):
         if not self.settings:
