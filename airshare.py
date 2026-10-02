@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -55,7 +55,7 @@ GREEN, BLUE, ORANGE = QColor(34, 197, 94), QColor(59, 130, 246), QColor(249, 115
 RELEASES_API = "https://api.github.com/repos/wallisoft/airshare-releases/releases/latest"
 SETUP_URL = "https://github.com/wallisoft/airshare-releases/releases/latest/download/AirShare-Setup.exe"
 LINUX_INSTALL = "curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash"
-STORE_URL = "ms-windows-store://downloadsandupdates"     # the Store's own updates page
+STORE_URL = "ms-windows-store://pdp/?productid=9NK09P1L0KTJ"     # AirShare KVM in the Microsoft Store
 WEBSITE = "https://airshare.eur.bz/#download"
 UPDATE_CHECK_EVERY = 6 * 3600
 
