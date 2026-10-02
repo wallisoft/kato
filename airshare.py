@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -58,6 +58,33 @@ LINUX_INSTALL = "curl -fsSL https://github.com/wallisoft/airshare-releases/relea
 STORE_URL = "ms-windows-store://downloadsandupdates"     # the Store's own updates page
 WEBSITE = "https://airshare.eur.bz/#download"
 UPDATE_CHECK_EVERY = 6 * 3600
+
+
+def hardware_ids():
+    """This computer's physical network-card addresses. A dual-boot machine has the same card under
+    both systems, so these say "same computer" even when the name differs."""
+    found = set()
+    try:
+        if platform.system() == "Linux":
+            for dev in os.listdir("/sys/class/net"):
+                if dev == "lo" or not os.path.exists(f"/sys/class/net/{dev}/device"):
+                    continue                                  # virtual: docker, bridges, VPNs
+                with open(f"/sys/class/net/{dev}/address") as f:
+                    found.add(f.read().strip().lower())
+        elif platform.system() == "Windows":
+            out = subprocess.run(["getmac", "/fo", "csv", "/nh"], capture_output=True, text=True,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5).stdout
+            for m in re.findall(r"([0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5})", out):
+                found.add(m.replace("-", ":").lower())
+    except Exception as exc:
+        log(f"couldn't read network addresses: {exc}")
+    if not found:
+        import uuid
+        node = uuid.getnode()
+        if not (node >> 40) & 1:                              # a real address, not uuid's random fallback
+            found.add(":".join(f"{(node >> s) & 0xff:02x}" for s in range(40, -8, -8)))
+    found.discard("00:00:00:00:00:00")
+    return sorted(found)
 
 
 def install_kind():
@@ -422,6 +449,8 @@ class AirShare(ClipboardSync, Mesh):
         self.paused = False
         self.sizes = {}                 # machine name -> (w, h), as reported by each machine
         self.versions = {}              # machine name -> AirShare version it reports
+        self.hw = hardware_ids()        # this machine's network-card addresses
+        self.machine_hw = {}            # machine name -> its addresses, as reported
         self._stand_in = False          # Windows: our own pointer is showing (Windows hid its own)
         self.latest = None              # newest release on GitHub, once checked
         # main-computer state
@@ -505,7 +534,9 @@ class AirShare(ClipboardSync, Mesh):
         return self.link_to(self.neighbour(side))
 
     def set_layout(self, cells, master, kvm=True, share=True):
-        self.layout = {"cells": cells, "master": master, "kvm": bool(kvm), "version": time.time()}
+        known = {**self.layout.get("hw", {}), **self.machine_hw, self.cfg.name: self.hw}
+        hw = {n: known[n] for n in cells if known.get(n)}
+        self.layout = {"cells": cells, "master": master, "kvm": bool(kvm), "hw": hw, "version": time.time()}
         self._save_layout()
         self.apply_role()
         if share:
@@ -519,12 +550,37 @@ class AirShare(ClipboardSync, Mesh):
         bx, by, bw, bh = self.bounds
         for link in list(self.links.values()):
             if link.alive:
-                self._send(link, {"type": "screen", "name": self.cfg.name, "w": bw, "h": bh, "version": VERSION})
+                self._send(link, {"type": "screen", "name": self.cfg.name, "w": bw, "h": bh, "version": VERSION,
+                                  "hw": self.hw})
                 if self.cells():
                     self._send(link, {"type": "layout", "layout": self.layout})
 
+    def adopt_by_hardware(self, name, hw):
+        """A machine that isn't in the grid, but shares a network card with a placed machine that's
+        offline, is the same computer under another name (dual boot): it takes that machine's place."""
+        cells = self.cells()
+        if not hw or not name or name in cells:
+            return
+        known = self.layout.get("hw", {})
+        for placed in list(cells):
+            if placed == self.cfg.name and name != self.cfg.name:
+                continue
+            if placed != self.cfg.name and self.link_to(placed) is not None:
+                continue                                      # it's online: a different computer
+            if not set(known.get(placed, [])) & set(hw):
+                continue
+            new_cells = dict(cells)
+            new_cells[name] = new_cells.pop(placed)
+            master = name if self.master() == placed else self.master()
+            self.machine_hw[name] = list(hw)
+            self.set_layout(new_cells, master, self.kvm_on())
+            log(f"{name} has taken {placed}'s place in the grid (same computer)")
+            self.notify(f"{name} has taken {placed}'s place (same computer)")
+            return
+
     def layout_loop(self):
         while self.running:
+            self.adopt_by_hardware(self.cfg.name, self.hw)
             self.share_state()
             time.sleep(LAYOUT_EVERY)
 
@@ -794,11 +850,16 @@ class AirShare(ClipboardSync, Mesh):
             if name:
                 self.sizes[name] = (int(header.get("w", 1920)), int(header.get("h", 1080)))
                 self.versions[name] = str(header.get("version", "old"))
+                hw = [str(h).lower() for h in header.get("hw", []) if h]
+                if hw:
+                    self.machine_hw[name] = hw
+                    self.adopt_by_hardware(name, hw)
         elif t == "layout":
             theirs = header.get("layout") or {}
             if float(theirs.get("version", 0)) > float(self.layout.get("version", 0)):
                 self.layout = {"cells": dict(theirs.get("cells", {})), "master": theirs.get("master"),
-                               "kvm": bool(theirs.get("kvm", True)), "version": float(theirs["version"])}
+                               "kvm": bool(theirs.get("kvm", True)), "hw": dict(theirs.get("hw", {})),
+                               "version": float(theirs["version"])}
                 self._save_layout()
                 log(f"layout updated by another machine (main computer: {self.master()})")
                 self.apply_role()
