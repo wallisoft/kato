@@ -40,7 +40,7 @@ Name: "secure"; Description: "Control this PC at the Windows login and security 
 ; The whole compiled folder. Qt stays as separate, replaceable libraries (LGPL).
 Source: "..\build\airshare.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\build\airshare-service.dist\*"; DestDir: "{app}\service"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: secure
+Source: "..\build\airshare_service.dist\*"; DestDir: "{app}\service"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: secure
 
 [Icons]
 Name: "{group}\AirShare"; Filename: "{app}\airshare.exe"
