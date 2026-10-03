@@ -52,13 +52,11 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare discovery (UDP 47812)"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""AirShare (TCP 47810)"" dir=in action=allow protocol=TCP localport=47810 profile=private,domain"; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""AirShare discovery (UDP 47812)"" dir=in action=allow protocol=UDP localport=47812 profile=private,domain"; Flags: runhidden
-Filename: "{app}\service\airshare-service.exe"; Parameters: "--startup=auto install"; Flags: runhidden; Components: secure
-Filename: "{app}\service\airshare-service.exe"; Parameters: "start"; Flags: runhidden; Components: secure
+Filename: "{app}\service\airshare-service.exe"; Parameters: "install"; Flags: runhidden; Components: secure
 Filename: "{app}\airshare.exe"; Description: "Start AirShare now"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
-Filename: "{app}\service\airshare-service.exe"; Parameters: "stop"; Flags: runhidden; RunOnceId: "StopSvc"; Check: FileExists(ExpandConstant('{app}\service\airshare-service.exe'))
-Filename: "{app}\service\airshare-service.exe"; Parameters: "remove"; Flags: runhidden; RunOnceId: "RemoveSvc"; Check: FileExists(ExpandConstant('{app}\service\airshare-service.exe'))
+Filename: "{app}\service\airshare-service.exe"; Parameters: "remove"; Flags: runhidden; RunOnceId: "RemoveSvc1"; Check: FileExists(ExpandConstant('{app}\service\airshare-service.exe'))
 Filename: "{app}\airshare.exe"; Parameters: "--quit"; Flags: runhidden; RunOnceId: "QuitAirShare"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare (TCP 47810)"""; Flags: runhidden; RunOnceId: "DelTcp"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare discovery (UDP 47812)"""; Flags: runhidden; RunOnceId: "DelUdp"
