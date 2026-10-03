@@ -196,10 +196,9 @@ SERVICE = Service()
 
 
 def run_as_service():
-    servicemanager.Initialize()
-    # dispatch our own service body (no pythonservice.exe needed)
-    servicemanager.PrepareToHostSingle = None
-    win32service.StartServiceCtrlDispatcher([(SVC_NAME, SERVICE.main)])
+    # the service control dispatcher lives in servicemanager, and takes the name + our body function
+    servicemanager.Initialize(SVC_NAME, None)
+    servicemanager.StartServiceCtrlDispatcher([(SVC_NAME, SERVICE.main)])
 
 
 # ----- install / remove, via Windows' own service manager (sc) --------------
