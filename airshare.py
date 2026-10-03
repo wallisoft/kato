@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.6.7"
+VERSION = "0.7.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -258,6 +258,62 @@ class XGrabber:
 
 
 _WIN_INPUT = None
+
+
+class SecureInput:
+    """Talks to the optional AirShare Input Service (SYSTEM) so we can inject onto Windows' secure
+    desktops (UAC, the login screen) too. Silently does nothing if the service isn't installed, so
+    the feature is simply absent unless the user chose it in the installer."""
+    PIPE = r"\\.\pipe\AirShareInput"
+
+    def __init__(self):
+        self.handle = None
+        self.available = False
+        self.checked = 0.0
+
+    def _open(self):
+        import ctypes
+        GENERIC = 0xC0000000
+        OPEN_EXISTING = 3
+        h = ctypes.windll.kernel32.CreateFileW(self.PIPE, GENERIC, 0, None, OPEN_EXISTING, 0, None)
+        if h == -1 or h == 0xFFFFFFFFFFFFFFFF:
+            return None
+        mode = ctypes.c_ulong(0x00000002)                 # PIPE_READMODE_MESSAGE
+        ctypes.windll.kernel32.SetNamedPipeHandleState(h, ctypes.byref(mode), None, None)
+        return h
+
+    def present(self):
+        """Is the service installed and reachable? Re-checked occasionally, cheaply."""
+        if not WINDOWS:
+            return False
+        now = time.time()
+        if self.handle is None and now - self.checked > 3:
+            self.checked = now
+            self.handle = self._open()
+            self.available = self.handle is not None
+            if self.available:
+                log("secure-desktop input service connected")
+        return self.handle is not None
+
+    def send(self, cmd):
+        if not self.present():
+            return False
+        import ctypes
+        data = (json.dumps(cmd) + "\n").encode("utf-8")
+        written = ctypes.c_ulong(0)
+        ok = ctypes.windll.kernel32.WriteFile(self.handle, data, len(data), ctypes.byref(written), None)
+        if not ok:
+            try:
+                ctypes.windll.kernel32.CloseHandle(self.handle)
+            except Exception:
+                pass
+            self.handle = None                             # make the next call reconnect
+            self.available = False
+            return False
+        return True
+
+
+SECURE_INPUT = SecureInput()
 
 
 def win_move_abs(x, y):
@@ -755,7 +811,7 @@ class AirShare(ClipboardSync, Mesh):
                     log("input listening stopped unexpectedly: coming home")
                     threading.Thread(target=self._home_safely, daemon=True).start()
                     return
-                if input_blocked():
+                if input_blocked() and not SECURE_INPUT.present():
                     log("secure screen on this machine: coming home")
                     threading.Thread(target=self._home_safely, daemon=True).start()
                     return
@@ -872,7 +928,7 @@ class AirShare(ClipboardSync, Mesh):
                 threading.Thread(target=self._home_safely, daemon=True).start()
         # ---- being driven ----
         elif t == "kvm_enter":
-            if input_blocked() or self.paused:
+            if (input_blocked() and not SECURE_INPUT.present()) or self.paused:
                 link.send({"type": "kvm_leave"})
                 log("refused control: this machine is " + ("paused" if self.paused else "locked"))
                 return
@@ -890,6 +946,8 @@ class AirShare(ClipboardSync, Mesh):
             x, y = bx + int(header.get("x", 0)), by + int(header.get("y", 0))
             if WINDOWS:
                 try:
+                    if input_blocked() and SECURE_INPUT.send({"t": "move", "x": x, "y": y}):
+                        return
                     win_move_abs(x, y)
                     hidden = win_cursor_hidden()
                     if hidden or self._stand_in:
@@ -900,16 +958,25 @@ class AirShare(ClipboardSync, Mesh):
                     log(f"real-mouse move failed, placing the pointer instead: {exc}")
             self.mouse.position = (x, y)
         elif t == "kvm_btn" and self.driven_by is link:
-            btn = getattr(mouse.Button, str(header.get("button")), None)
+            name = str(header.get("button"))
+            if WINDOWS and input_blocked() and SECURE_INPUT.send(
+                    {"t": "btn", "button": name, "down": bool(header.get("down"))}):
+                return
+            btn = getattr(mouse.Button, name, None)
             if btn:
                 (self.mouse.press if header.get("down") else self.mouse.release)(btn)
         elif t == "kvm_scroll" and self.driven_by is link:
-            self.mouse.scroll(int(header.get("dx", 0)), int(header.get("dy", 0)))
+            dx, dy = int(header.get("dx", 0)), int(header.get("dy", 0))
+            if WINDOWS and input_blocked() and SECURE_INPUT.send({"t": "scroll", "dx": dx, "dy": dy}):
+                return
+            self.mouse.scroll(dx, dy)
         elif t == "kvm_key" and self.driven_by is link:
             k = wire_to_key(header.get("key") or {})
             if k is None:
                 return
             ident = json.dumps(header.get("key"), sort_keys=True)
+            if WINDOWS and input_blocked() and self._secure_key(header.get("key") or {}, bool(header.get("down"))):
+                return
             try:
                 if header.get("down"):
                     self.kb.press(k)
@@ -920,9 +987,33 @@ class AirShare(ClipboardSync, Mesh):
             except Exception as exc:
                 log(f"couldn't type {header.get('key')}: {exc}")
 
+    # Windows virtual-key codes for the non-character keys we send
+    _VK = {"enter": 0x0D, "return": 0x0D, "tab": 0x09, "space": 0x20, "backspace": 0x08, "delete": 0x2E,
+           "esc": 0x1B, "escape": 0x1B, "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+           "home": 0x24, "end": 0x23, "page_up": 0x21, "page_down": 0x22, "insert": 0x2D,
+           "shift": 0x10, "shift_r": 0x10, "ctrl": 0x11, "ctrl_l": 0x11, "ctrl_r": 0x11,
+           "alt": 0x12, "alt_l": 0x12, "alt_r": 0x12, "alt_gr": 0x12, "cmd": 0x5B, "cmd_r": 0x5C,
+           "caps_lock": 0x14, "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
+           "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B}
+
+    def _secure_key(self, wire, down):
+        """Relay one key press/release to the secure-desktop service. wire is the on-the-wire key dict:
+        {"name": "enter"} a named key, {"char": "a"} a character, or {"vk": 65} a raw virtual key."""
+        if "name" in wire:
+            vk = self._VK.get(str(wire["name"]).lower())
+            return SECURE_INPUT.send({"t": "key", "vk": vk, "down": down}) if vk else False
+        if "char" in wire and wire["char"]:
+            return SECURE_INPUT.send({"t": "key", "char": ord(wire["char"][0]), "down": down})
+        if "vk" in wire:
+            return SECURE_INPUT.send({"t": "key", "vk": int(wire["vk"]), "down": down})
+        return False
+
+    def secure_available(self):
+        return WINDOWS and SECURE_INPUT.present()
+
     def _alive_loop(self, link):
         while self.driven_by is link and link.alive:
-            if input_blocked():
+            if input_blocked() and not SECURE_INPUT.present():
                 self._release_all()
                 self.driven_by = None
                 link.send({"type": "kvm_leave"})

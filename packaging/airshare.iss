@@ -26,31 +26,39 @@ CloseApplications=yes
 
 [Tasks]
 Name: "startup"; Description: "Start AirShare when I sign in"; GroupDescription: "Options:"
-Name: "elevated"; Description: "Let AirShare control windows that run as administrator (starts AirShare with administrator rights at sign-in). Leave unticked unless you need it."; GroupDescription: "Advanced:"; Flags: unchecked
+
+[Types]
+Name: "standard"; Description: "Standard"
+Name: "full"; Description: "With login and security (UAC) screen control"
+Name: "custom"; Description: "Custom"; Flags: iscustom
+
+[Components]
+Name: "app"; Description: "AirShare"; Types: standard full custom; Flags: fixed
+Name: "secure"; Description: "Control this PC at the Windows login and security (UAC) screens.\nInstalls a background service (SYSTEM). For headless PCs with no keyboard or mouse of their own. Off by default."; Types: full
 
 [Files]
 ; The whole compiled folder. Qt stays as separate, replaceable libraries (LGPL).
 Source: "..\build\airshare.dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\build\airshare-service.dist\*"; DestDir: "{app}\service"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: secure
 
 [Icons]
 Name: "{group}\AirShare"; Filename: "{app}\airshare.exe"
 Name: "{group}\Third-party notices"; Filename: "{app}\THIRD-PARTY-NOTICES.txt"
-Name: "{userstartup}\AirShare"; Filename: "{app}\airshare.exe"; Tasks: startup and not elevated
+Name: "{userstartup}\AirShare"; Filename: "{app}\airshare.exe"; Tasks: startup
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare (TCP 47810)"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare discovery (UDP 47812)"""; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""AirShare (TCP 47810)"" dir=in action=allow protocol=TCP localport=47810 profile=private,domain"; Flags: runhidden
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""AirShare discovery (UDP 47812)"" dir=in action=allow protocol=UDP localport=47812 profile=private,domain"; Flags: runhidden
-; Elevated mode: a sign-in task with highest privileges (no UAC prompt each time).
-Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""AirShare"" /F"; Flags: runhidden
-Filename: "{sys}\schtasks.exe"; Parameters: "/Create /F /TN ""AirShare"" /SC ONLOGON /RL HIGHEST /IT /RU ""{username}"" /TR ""\""{app}\airshare.exe\"""""; Flags: runhidden; Tasks: elevated
-Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""AirShare"""; Description: "Start AirShare now"; Flags: runhidden nowait postinstall skipifsilent; Tasks: elevated
-Filename: "{app}\airshare.exe"; Description: "Start AirShare now"; Flags: nowait postinstall skipifsilent runasoriginaluser; Tasks: not elevated
+Filename: "{app}\service\airshare-service.exe"; Parameters: "--startup=auto install"; Flags: runhidden; Components: secure
+Filename: "{app}\service\airshare-service.exe"; Parameters: "start"; Flags: runhidden; Components: secure
+Filename: "{app}\airshare.exe"; Description: "Start AirShare now"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
+Filename: "{app}\service\airshare-service.exe"; Parameters: "stop"; Flags: runhidden; RunOnceId: "StopSvc"; Check: FileExists(ExpandConstant('{app}\service\airshare-service.exe'))
+Filename: "{app}\service\airshare-service.exe"; Parameters: "remove"; Flags: runhidden; RunOnceId: "RemoveSvc"; Check: FileExists(ExpandConstant('{app}\service\airshare-service.exe'))
 Filename: "{app}\airshare.exe"; Parameters: "--quit"; Flags: runhidden; RunOnceId: "QuitAirShare"
-Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""AirShare"" /F"; Flags: runhidden; RunOnceId: "DelTask"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare (TCP 47810)"""; Flags: runhidden; RunOnceId: "DelTcp"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare discovery (UDP 47812)"""; Flags: runhidden; RunOnceId: "DelUdp"
