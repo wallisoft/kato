@@ -7,8 +7,9 @@ neighbour and it carries on onto that machine, keyboard and scrolling
 included. Push it back and it comes home. The layout is shared by the whole
 group: change it on any machine and every machine follows. No master.
 
-X11 and Windows for now; Wayland comes later. Discovery, trust and TLS come
-from clickboard_core (passphrase mode for now).
+X11 and Windows can be the main computer. A Wayland machine can be driven (through
+virtual input devices, see airshare_uinput.py) but can't be the main computer yet.
+Discovery, trust and TLS come from clickboard_core (passphrase mode for now).
 
   Emergency: Scroll Lock, or Esc three times quickly, brings the pointer home.
 """
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.7.3"
+VERSION = "0.8.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -205,6 +206,8 @@ def ensure_pointer_visible() -> bool:
 
 LINUX = platform.system() == "Linux"
 WINDOWS = platform.system() == "Windows"
+# A Wayland session: the X11 ways of watching and driving input only reach X11 programs here.
+WAYLAND = LINUX and (os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY")))
 
 
 class XGrabber:
@@ -531,6 +534,27 @@ class AirShare(ClipboardSync, Mesh):
         self.xgrab = XGrabber() if LINUX else None
         if LINUX:
             threading.Thread(target=self._self_heal, daemon=True).start()
+        self.uinput = None              # Wayland: the virtual mouse and keyboard we are driven through
+        self.uinput_error = ""
+        self._ensure_uinput()
+
+    def _ensure_uinput(self):
+        """Wayland only: create the virtual devices if they aren't there yet. Tried again each time another
+        machine wants to drive this one, so it starts working as soon as the installer has granted access."""
+        if not WAYLAND or self.uinput:
+            return bool(self.uinput)
+        try:
+            import importlib
+            airshare_uinput = importlib.import_module("airshare_uinput")     # Linux-only: kept out of the Windows build
+            if not airshare_uinput.available():
+                raise PermissionError("no access to /dev/uinput yet - run the AirShare installer again to grant it")
+            self.uinput = airshare_uinput.UinputInjector(log)
+            self.uinput_error = ""
+        except Exception as exc:
+            if str(exc) != self.uinput_error:
+                log(f"Wayland: can't be driven yet: {exc}")
+            self.uinput_error = str(exc)
+        return bool(self.uinput)
 
     # ---- plumbing ----
     def _send(self, link, header):
@@ -642,7 +666,10 @@ class AirShare(ClipboardSync, Mesh):
 
     def apply_role(self):
         """Only the main computer listens to input. The others install no hooks at all."""
-        want = self.is_master() and self.kvm_on()
+        want = self.is_master() and self.kvm_on() and not WAYLAND
+        if WAYLAND and self.is_master() and self.kvm_on() and not getattr(self, "_wayland_warned", False):
+            self._wayland_warned = True
+            log("this machine runs Wayland: it can be driven, but it can't be the main computer yet")
         if want and not self._input_on:
             self._start_input()
         elif not want and self._input_on:
@@ -932,6 +959,10 @@ class AirShare(ClipboardSync, Mesh):
                 link.send({"type": "kvm_leave"})
                 log("refused control: this machine is " + ("paused" if self.paused else "locked"))
                 return
+            if WAYLAND and not self._ensure_uinput():
+                link.send({"type": "kvm_leave"})
+                self.refresh_ui()
+                return
             if ensure_pointer_visible():
                 self.notify("Turned on Windows Mouse Keys so the pointer stays visible when another machine drives this one.")
             self.driven_by = link
@@ -956,9 +987,15 @@ class AirShare(ClipboardSync, Mesh):
                     return
                 except Exception as exc:
                     log(f"real-mouse move failed, placing the pointer instead: {exc}")
+            if self.uinput:
+                self.uinput.move(int(header.get("x", 0)), int(header.get("y", 0)), bw, bh)
+                return
             self.mouse.position = (x, y)
         elif t == "kvm_btn" and self.driven_by is link:
             name = str(header.get("button"))
+            if self.uinput:
+                self.uinput.button(name, bool(header.get("down")))
+                return
             if WINDOWS and input_blocked() and SECURE_INPUT.send(
                     {"t": "btn", "button": name, "down": bool(header.get("down"))}):
                 return
@@ -969,8 +1006,17 @@ class AirShare(ClipboardSync, Mesh):
             dx, dy = int(header.get("dx", 0)), int(header.get("dy", 0))
             if WINDOWS and input_blocked() and SECURE_INPUT.send({"t": "scroll", "dx": dx, "dy": dy}):
                 return
+            if self.uinput:
+                self.uinput.scroll(dx, dy)
+                return
             self.mouse.scroll(dx, dy)
         elif t == "kvm_key" and self.driven_by is link:
+            if self.uinput:
+                try:
+                    self.uinput.key(header.get("key") or {}, bool(header.get("down")))
+                except Exception as exc:
+                    log(f"couldn't type {header.get('key')}: {exc}")
+                return
             k = wire_to_key(header.get("key") or {})
             if k is None:
                 return
@@ -1024,6 +1070,11 @@ class AirShare(ClipboardSync, Mesh):
             time.sleep(ALIVE_EVERY)
 
     def _release_all(self):
+        if self.uinput:
+            try:
+                self.uinput.release_all()
+            except Exception as exc:
+                log(f"release failed: {exc}")
         for k in list(self._held_keys.values()):
             try:
                 self.kb.release(k)
@@ -1045,6 +1096,10 @@ class AirShare(ClipboardSync, Mesh):
             return self.status
         if self.paused:
             return "Paused"
+        if WAYLAND and self.master() and self.is_master() and self.kvm_on():
+            return "Wayland: this machine can be driven, but can't be the main computer yet - choose another in Layout"
+        if WAYLAND and not self.uinput and self.kvm_on():
+            return "Wayland: run the AirShare installer again so this machine can be driven"
         if not self.master():
             return "Choose the main computer in Layout"
         if self.active:
@@ -1130,6 +1185,7 @@ class AirShare(ClipboardSync, Mesh):
     def control_loop(self):
         try:
             cs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            cs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)     # so a quick restart can listen again at once
             cs.bind(("127.0.0.1", CONTROL_PORT))
             cs.listen(4)
         except OSError:
@@ -1497,8 +1553,15 @@ class Tray:
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh)
         self.timer.start(2000)
+        # Only show the icon where there is a tray to show it in: asking a desktop without one (GNOME with no
+        # tray extension) just prints a confusing D-Bus error. refresh() shows it later if a tray turns up.
+        self._icon_shown = QSystemTrayIcon.isSystemTrayAvailable()
         self.refresh()
-        self.icon.show()
+        if self._icon_shown:
+            self.icon.show()
+        else:
+            log("this desktop has no tray: opening the settings window instead (open AirShare from the app menu to see it again)")
+            QTimer.singleShot(1200, self.open_settings)
 
     def on_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger:
@@ -1507,6 +1570,9 @@ class Tray:
     def refresh(self):
         """Runs every 2 s. Only touches the tray when something has actually changed, and never
         rebuilds the menu while it's open: rebuilding unconditionally made it flicker."""
+        if not self._icon_shown and QSystemTrayIcon.isSystemTrayAvailable():
+            self._icon_shown = True
+            self.icon.show()
         a = self.app
         if self.stand_in and a.driven_by is None and self.stand_in.isVisible():
             self.stand_in.hide()

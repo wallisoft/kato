@@ -88,6 +88,7 @@ jobs:
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads --enable-plugin=pyside6 \
             --include-module=pynput.keyboard._xorg --include-module=pynput.mouse._xorg \
+            --include-module=airshare_uinput \
             --include-package=Xlib --output-dir=build airshare.py
       - name: Package
         run: |
@@ -123,7 +124,7 @@ jobs:
           name: AirShare ${{ needs.check.outputs.version }}
           body: |
             **Windows 10 and 11:** download `AirShare-Setup.exe` and run it.
-            **Linux (Ubuntu 22.04+ and similar, X11):** `curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash`
+            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; a Wayland machine can be driven but not yet be the main computer):** `curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash`
           files: |
             **/AirShare-Setup.exe
             **/airshare-linux-x86_64.tar.gz

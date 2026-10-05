@@ -5,8 +5,8 @@
 # Installs into your home folder; asks for your password only for system libraries
 # and firewall ports. Re-run to update.
 #
-# Works on Debian/Ubuntu/Mint, Fedora, Arch and openSUSE style systems. Keyboard and mouse sharing
-# needs an X11 session for now; on Wayland the installer says so plainly instead of pretending.
+# Works on Debian/Ubuntu/Mint, Fedora, Arch and openSUSE style systems. On X11 a machine can be the main
+# computer or be driven; on Wayland it can be driven (not yet be the main computer), and this says so.
 
 set -euo pipefail
 
@@ -109,6 +109,20 @@ DESKTOP
         sudo firewall-cmd --quiet --reload || true
     fi
 
+    # ---- Wayland: let AirShare act as a mouse and keyboard, so other machines can drive this one.
+    #      One udev rule gives the person logged in at this PC access to /dev/uinput (Steam does the same for
+    #      game controllers). It means programs you run can create virtual input devices.
+    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && [ ! -w /dev/uinput ]; then
+        echo "==> Need sudo now: letting AirShare act as a keyboard and mouse on Wayland"
+        echo 'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"' \
+            | sudo tee /etc/udev/rules.d/70-airshare-uinput.rules >/dev/null
+        echo uinput | sudo tee /etc/modules-load.d/airshare-uinput.conf >/dev/null
+        sudo modprobe uinput 2>/dev/null || true
+        sudo udevadm control --reload-rules 2>/dev/null || true
+        sudo udevadm trigger --action=change /dev/uinput 2>/dev/null || sudo udevadm trigger 2>/dev/null || true
+        sleep 1
+    fi
+
     # ---- start it, and check that it really is running before saying so
     echo "==> Starting AirShare"
     nohup "$DEST/airshare" > "$LOG" 2>&1 &
@@ -141,9 +155,14 @@ DESKTOP
         *) echo "  - Look for its dot in your tray, or open 'AirShare' from your app menu." ;;
     esac
     if [ "$session" = "wayland" ]; then
-        echo "  - This is a Wayland session. AirShare can't share the keyboard and mouse on Wayland yet; that is"
-        echo "    being worked on. It works in an X11 session (some login screens offer 'on Xorg' under the cog)."
-        echo "    Clipboard sharing may be unreliable here too."
+        if [ -w /dev/uinput ]; then
+            echo "  - This is a Wayland session. Another machine can drive this one. It can't be the main computer"
+            echo "    yet (the one whose keyboard and mouse you share); choose an X11 or Windows machine for that."
+        else
+            echo "  - This is a Wayland session, and AirShare could not get access to /dev/uinput, so this machine"
+            echo "    can't be driven yet. Logging out and in again may be all it needs; otherwise re-run this installer."
+        fi
+        echo "    Clipboard sharing may be unreliable on Wayland."
     fi
     if [ -n "$CLIP_WARNING" ]; then echo "  - $CLIP_WARNING"; fi
 }
