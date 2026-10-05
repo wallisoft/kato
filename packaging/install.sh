@@ -1,56 +1,92 @@
 #!/usr/bin/env bash
 #
-# AirShare installer for Linux (Ubuntu 22.04+ and similar, X11 sessions).
+# AirShare installer for Linux.
 #   curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash
 # Installs into your home folder; asks for your password only for system libraries
 # and firewall ports. Re-run to update.
+#
+# Works on Debian/Ubuntu/Mint, Fedora, Arch and openSUSE style systems. Keyboard and mouse sharing
+# needs an X11 session for now; on Wayland the installer says so plainly instead of pretending.
 
 set -euo pipefail
 
-URL="${AIRSHARE_URL:-https://github.com/wallisoft/airshare-releases/releases/latest/download/airshare-linux-x86_64.tar.gz}"
-DEST="$HOME/.local/opt/airshare"
+main() {
+    local URL="${AIRSHARE_URL:-https://github.com/wallisoft/airshare-releases/releases/latest/download/airshare-linux-x86_64.tar.gz}"
+    local DEST="$HOME/.local/opt/airshare"
+    local LOG="$HOME/.config/airshare/start.log"
 
-if [ "$(id -u)" -eq 0 ]; then
-    echo "Please run this as your normal user, not root. It asks for sudo only when it needs it." >&2
-    exit 1
-fi
-
-echo "==> Installing AirShare into $DEST"
-
-if command -v apt-get >/dev/null 2>&1; then
-    MISSING=()
-    for p in libxcb-cursor0 libnotify-bin xclip wl-clipboard; do
-        dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || MISSING+=("$p")
-    done
-    if [ ${#MISSING[@]} -gt 0 ]; then
-        echo "==> Need sudo now: installing ${MISSING[*]}"
-        sudo apt-get install -y "${MISSING[@]}" || echo "    (apt reported errors; carrying on)"
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "Please run this as your normal user, not root. It asks for sudo only when it needs it." >&2
+        exit 1
     fi
-fi
 
-pkill -f "$DEST/airshare" 2>/dev/null || true
+    echo "==> Installing AirShare into $DEST"
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-echo "==> Downloading the latest AirShare"
-curl -fsSL "$URL" -o "$tmp/airshare.tar.gz"
-rm -rf "$DEST"
-mkdir -p "$DEST"
-tar xzf "$tmp/airshare.tar.gz" -C "$DEST" --strip-components=1
-# Older builds name the program airshare.bin; make sure "airshare" exists either way.
-if [ ! -f "$DEST/airshare" ] && [ -f "$DEST/airshare.bin" ]; then
-    ln -sf "$DEST/airshare.bin" "$DEST/airshare"
-fi
-if [ ! -x "$DEST/airshare" ] && [ ! -L "$DEST/airshare" ]; then
-    echo "The download doesn't contain the AirShare program. Please report this." >&2
-    ls "$DEST" >&2
-    exit 1
-fi
-chmod +x "$DEST/airshare" 2>/dev/null || true
+    # ---- what AirShare needs from the system, by the names each family of distro uses
+    #      (the Qt cursor library, desktop notifications, and a clipboard tool for X11 and for Wayland)
+    local PM="" PKGS="" INSTALL=""
+    if command -v apt-get >/dev/null 2>&1; then
+        PM=apt;    PKGS="libxcb-cursor0 libnotify-bin xclip wl-clipboard"
+        INSTALL="sudo apt-get -o DPkg::Lock::Timeout=180 install -y"      # wait if the system updater is busy
+    elif command -v dnf >/dev/null 2>&1; then
+        PM=dnf;    PKGS="xcb-util-cursor libnotify xclip wl-clipboard";  INSTALL="sudo dnf install -y"
+    elif command -v pacman >/dev/null 2>&1; then
+        PM=pacman; PKGS="xcb-util-cursor libnotify xclip wl-clipboard";  INSTALL="sudo pacman -S --needed --noconfirm"
+    elif command -v zypper >/dev/null 2>&1; then
+        PM=zypper; PKGS="libxcb-cursor0 libnotify-tools xclip wl-clipboard"; INSTALL="sudo zypper --non-interactive install"
+    fi
 
-mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.config/autostart"
-ln -sf "$DEST/airshare" "$HOME/.local/bin/airshare"
-cat > "$HOME/.local/share/applications/airshare.desktop" << DESKTOP
+    # (grep reads to the end on purpose: with 'pipefail', a grep that stops early makes the whole test fail at random)
+    have_cursor_lib() { ldconfig -p 2>/dev/null | grep 'libxcb-cursor\.so\.0' >/dev/null || ls /usr/lib*/libxcb-cursor.so.0 /usr/lib/*/libxcb-cursor.so.0 >/dev/null 2>&1; }
+    have_clip_tool()  { command -v xclip >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1; }
+
+    if ! have_cursor_lib || ! command -v xclip >/dev/null 2>&1 || ! command -v wl-paste >/dev/null 2>&1 || ! command -v notify-send >/dev/null 2>&1; then
+        if [ -n "$PM" ]; then
+            echo "==> Need sudo now: installing what AirShare needs ($PKGS)"
+            $INSTALL $PKGS || echo "    ($PM reported a problem; checking what is actually there)"
+        else
+            echo "==> This system's package manager isn't one this installer knows."
+        fi
+    fi
+
+    # ---- never carry on blind: say exactly what is missing and how to get it
+    if ! have_cursor_lib; then
+        echo >&2
+        echo "AirShare can't start without the Qt cursor library (libxcb-cursor), and it isn't installed." >&2
+        if [ -n "$PM" ]; then echo "Install it with:   $INSTALL $PKGS" >&2; echo "then run this installer again." >&2
+        else echo "Install your distro's 'libxcb-cursor' (sometimes 'xcb-util-cursor') package, then run this installer again." >&2; fi
+        exit 1
+    fi
+    local CLIP_WARNING=""
+    if ! have_clip_tool; then
+        CLIP_WARNING="Clipboard sharing will NOT work until a clipboard tool is installed: ${INSTALL:-install} xclip wl-clipboard"
+    fi
+
+    pkill -f "$DEST/airshare" 2>/dev/null || true
+
+    local tmp
+    tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" EXIT
+    echo "==> Downloading the latest AirShare"
+    curl -fsSL "$URL" -o "$tmp/airshare.tar.gz"
+    rm -rf "$DEST"
+    mkdir -p "$DEST"
+    tar xzf "$tmp/airshare.tar.gz" -C "$DEST" --strip-components=1
+    # Older builds name the program airshare.bin; make sure "airshare" exists either way.
+    if [ ! -f "$DEST/airshare" ] && [ -f "$DEST/airshare.bin" ]; then
+        ln -sf "$DEST/airshare.bin" "$DEST/airshare"
+    fi
+    if [ ! -x "$DEST/airshare" ] && [ ! -L "$DEST/airshare" ]; then
+        echo "The download doesn't contain the AirShare program. Please report this." >&2
+        ls "$DEST" >&2
+        exit 1
+    fi
+    chmod +x "$DEST/airshare" 2>/dev/null || true
+
+    mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.config/autostart" "$HOME/.config/airshare"
+    ln -sf "$DEST/airshare" "$HOME/.local/bin/airshare"
+    cat > "$HOME/.local/share/applications/airshare.desktop" << DESKTOP
 [Desktop Entry]
 Type=Application
 Name=AirShare
@@ -60,15 +96,56 @@ Icon=$DEST/airshare.png
 Terminal=false
 Categories=Utility;
 DESKTOP
-cp "$HOME/.local/share/applications/airshare.desktop" "$HOME/.config/autostart/"
+    cp "$HOME/.local/share/applications/airshare.desktop" "$HOME/.config/autostart/"
 
-if command -v ufw >/dev/null 2>&1 && sudo ufw status 2>/dev/null | grep -q "Status: active"; then
-    echo "==> Need sudo now: opening AirShare's ports in the firewall"
-    sudo ufw allow 47810/tcp comment 'AirShare' >/dev/null
-    sudo ufw allow 47812/udp comment 'AirShare discovery' >/dev/null
-fi
+    # ---- firewall: AirShare's two ports, on whichever firewall this system runs
+    if command -v ufw >/dev/null 2>&1 && sudo ufw status 2>/dev/null | grep "Status: active" >/dev/null; then
+        echo "==> Need sudo now: opening AirShare's ports in the firewall"
+        sudo ufw allow 47810/tcp comment 'AirShare' >/dev/null
+        sudo ufw allow 47812/udp comment 'AirShare discovery' >/dev/null
+    elif command -v firewall-cmd >/dev/null 2>&1 && sudo firewall-cmd --state >/dev/null 2>&1; then
+        echo "==> Need sudo now: opening AirShare's ports in the firewall"
+        sudo firewall-cmd --quiet --permanent --add-port=47810/tcp --add-port=47812/udp || true
+        sudo firewall-cmd --quiet --reload || true
+    fi
 
-echo "==> Starting AirShare"
-nohup "$DEST/airshare" >/dev/null 2>&1 &
-echo
-echo "Done. AirShare is in your tray and app menu, and starts when you log in."
+    # ---- start it, and check that it really is running before saying so
+    echo "==> Starting AirShare"
+    nohup "$DEST/airshare" > "$LOG" 2>&1 &
+    local i=0 up=""
+    while [ $i -lt 10 ]; do
+        sleep 1; i=$((i + 1))
+        if (exec 3<>/dev/tcp/127.0.0.1/47811) 2>/dev/null; then up=yes; break; fi
+        pgrep -f "$DEST/airshare" >/dev/null 2>&1 || break
+    done
+    if [ -z "$up" ] && ! pgrep -f "$DEST/airshare" >/dev/null 2>&1; then
+        echo >&2
+        echo "AirShare was installed but did not start. This is what it said:" >&2
+        tail -n 15 "$LOG" >&2 || true
+        echo >&2
+        echo "The full log is at $LOG" >&2
+        exit 1
+    fi
+
+    echo
+    echo "Done. AirShare is installed and running, and starts when you log in."
+
+    # ---- say what to expect on THIS desktop, rather than promising a tray icon that may not exist
+    local session="${XDG_SESSION_TYPE:-}" desktop="${XDG_CURRENT_DESKTOP:-}"
+    case "$desktop" in
+        *GNOME*)
+            if ! gnome-extensions list --enabled 2>/dev/null | grep -iE 'appindicator|tray' >/dev/null; then
+                echo "  - This desktop (GNOME) shows no tray icons, so you won't see AirShare's. Open 'AirShare' from"
+                echo "    your app menu to see its settings. It is running either way."
+            fi ;;
+        *) echo "  - Look for its dot in your tray, or open 'AirShare' from your app menu." ;;
+    esac
+    if [ "$session" = "wayland" ]; then
+        echo "  - This is a Wayland session. AirShare can't share the keyboard and mouse on Wayland yet; that is"
+        echo "    being worked on. It works in an X11 session (some login screens offer 'on Xorg' under the cog)."
+        echo "    Clipboard sharing may be unreliable here too."
+    fi
+    if [ -n "$CLIP_WARNING" ]; then echo "  - $CLIP_WARNING"; fi
+}
+
+main "$@"
