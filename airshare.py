@@ -39,7 +39,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.9.3"
+from airshare_files import BigFiles
+
+VERSION = "0.9.4"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -485,7 +487,7 @@ class Bridge(QObject):
     pointer = Signal(int, int, bool)    # stand-in pointer: x, y (screen pixels), show
 
 
-class AirShare(ClipboardSync, Mesh):
+class AirShare(BigFiles, ClipboardSync, Mesh):
     """One MAIN computer captures its keyboard and mouse and drives the others.
 
     The main computer keeps a virtual pointer for whichever screen is active and
@@ -525,6 +527,7 @@ class AirShare(ClipboardSync, Mesh):
         self._sent_down = {}
         self._grabs, self._watchers = [], []
         self._esc_times = []
+        self._xfer_init()                    # large copies, see airshare_files.py
         self._last_alive = 0.0
         self._busy = False              # a crossing is being set up
         self._input_on = False
@@ -1020,6 +1023,8 @@ class AirShare(ClipboardSync, Mesh):
         if t in ClipboardSync.CLIP_FRAMES:
             ClipboardSync.on_frame(self, link, header, payload)
             return
+        if self.on_transfer_frame(link, header):              # two machines agreeing a large copy
+            return
         bx, by, bw, bh = self.bounds
         if t == "screen":
             name = self.peers.get(link.peer_id, {}).get("name") or str(header.get("name", ""))
@@ -1218,6 +1223,8 @@ class AirShare(ClipboardSync, Mesh):
 
     # ---- status ----
     def status_line(self):
+        if self.transfer_line():
+            return self.transfer_line()
         if self.status:
             return self.status
         if self.paused:
