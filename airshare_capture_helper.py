@@ -161,29 +161,38 @@ def set_barriers(sides):
 
 
 def switch_off(why, rest):
-    """Stop capturing altogether (this always frees the keyboard and mouse), say why, and come back after a rest."""
-    S["activation"], S["resting"] = None, True
-    try:
-        if S["enabled"]:
-            call("Disable", GLib.Variant("(oa{sv})", (S["session"], {})))
-    except Exception:
-        pass
-    S["enabled"] = False
+    """Hand the input back, say why, and ignore the screen edge for a rest.
+    This used to switch capturing off and on again. After that the desktop still takes the keyboard and mouse
+    at the edge but delivers none of it, which freezes this machine, so capturing now stays on throughout."""
+    S["resting"] = True
+    if S["activation"] is not None:
+        release()
+    else:
+        try:
+            call("Release", GLib.Variant("(oa{sv})", (S["session"], {})))
+        except Exception:
+            pass
     out(e="error", msg=why)
     out(e="deactivated")
 
     def back():
         S["resting"] = False
-        if S["sides"]:
-            set_barriers(S["sides"])
         return False
     GLib.timeout_add_seconds(rest, back)
+
+
+def start_afresh(why):
+    """Stop this helper. That always frees the keyboard and mouse, and AirShare starts a new one in a few seconds."""
+    out(e="error", msg=why + ": starting the capture afresh")
+    loop.quit()
 
 
 def stats():
     """Say how much input the desktop actually delivered during the capture that is ending."""
     if S.get("act_at"):
         out(e="stats", secs=round(time.monotonic() - S["act_at"], 1), motion=S.get("n_m", 0), keys=S.get("n_k", 0))
+        if S.get("n_m", 0) + S.get("n_k", 0):
+            S["strikes"] = 0
     S["act_at"] = 0.0
 
 
@@ -252,6 +261,12 @@ def on_ei(*_):
         if not ev:
             break
         t = lib.ei_event_get_type(ev)
+        if t == 2:                                              # the desktop closed the input channel
+            lib.ei_event_unref(ev)
+            start_afresh("the desktop closed the input channel")
+            return False
+        if t not in (3, 100, 300, 500, 600, 603, 700):
+            S.setdefault("others", {})[t] = S.setdefault("others", {}).get(t, 0) + 1
         if t == 3:                                              # a seat: say which kinds of input we want from it
             lib.ei_seat_bind_capabilities(P(lib.ei_event_get_seat(ev)), ctypes.c_int(EI_CAP_POINTER), ctypes.c_int(EI_CAP_KEYBOARD),
                                           ctypes.c_int(EI_CAP_SCROLL), ctypes.c_int(EI_CAP_BUTTON), P(None))
@@ -299,9 +314,13 @@ def on_ei(*_):
             now = time.monotonic()
             if not S["orphan"]:
                 S["orphan"] = now
-            elif now - S["orphan"] > 1.0:
+            elif now - S["orphan"] > 1.5:
                 S["orphan"] = 0.0
-                switch_off("the desktop kept sending input with no capture in progress: capturing switched off for a moment", 3)
+                S["orphan_hits"] = [t0 for t0 in S.get("orphan_hits", []) if now - t0 < 20] + [now]
+                if len(S["orphan_hits"]) >= 2:
+                    start_afresh("the desktop keeps sending input with no capture in progress")
+                    return False
+                switch_off("the desktop kept sending input with no capture in progress: handed it back", 2)
         return True
     S["orphan"] = 0.0
     if mx or my:
@@ -312,6 +331,12 @@ def on_ei(*_):
 def on_activated(_c, _s, _p, _i, _sig, params):
     _session, opts = params.unpack()
     now = time.monotonic()
+    if S["resting"]:
+        try:
+            call("Release", GLib.Variant("(oa{sv})", (S["session"], {"activation_id": GLib.Variant("u", opts.get("activation_id", 0))})))
+        except Exception:
+            pass
+        return
     S["activation"], S["alive"], S["released_at"], S["esc"], S["orphan"] = opts.get("activation_id", 0), now, 0.0, [], 0.0
     S["act_at"], S["n_m"], S["n_k"] = now, 0, 0
     S["captures"] = [t0 for t0 in S["captures"] if now - t0 < BOUNCE_WINDOW] + [now]
@@ -354,6 +379,19 @@ def on_zones_changed(*_):
 
 
 def watchdog():
+    if (S["activation"] is not None and S.get("act_at") and S.get("n_m", 0) + S.get("n_k", 0) == 0
+            and time.monotonic() - S["act_at"] > 2.5):
+        S["strikes"] = S.get("strikes", 0) + 1
+        seen = ", ".join(f"{k}x{v}" for k, v in sorted(S.get("others", {}).items())) or "none"
+        S["others"] = {}
+        out(e="error", msg=f"the desktop took the keyboard and mouse but passed none of it on for 2.5 seconds "
+                           f"(other messages from it: {seen}): handing them back")
+        release()
+        out(e="deactivated")
+        if S["strikes"] >= 2:
+            start_afresh("that happened twice running")
+            return False
+        return True
     if S["activation"] is not None and time.monotonic() - S["alive"] > HEARTBEAT_LIMIT:
         out(e="error", msg="AirShare went quiet while holding the keyboard and mouse: handing them back")
         release()

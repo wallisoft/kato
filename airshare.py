@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
