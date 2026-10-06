@@ -5,8 +5,7 @@
 # Installs into your home folder; asks for your password only for system libraries
 # and firewall ports. Re-run to update.
 #
-# Works on Debian/Ubuntu/Mint, Fedora, Arch and openSUSE style systems. On X11 a machine can be the main
-# computer or be driven; on Wayland it can be driven (not yet be the main computer), and this says so.
+# Works on Debian/Ubuntu/Mint, Fedora, Arch and openSUSE style systems, on X11 and on Wayland.
 
 set -euo pipefail
 
@@ -23,24 +22,30 @@ main() {
     echo "==> Installing AirShare into $DEST"
 
     # ---- what AirShare needs from the system, by the names each family of distro uses
-    #      (the Qt cursor library, desktop notifications, and a clipboard tool for X11 and for Wayland)
+    #      (the Qt cursor library, desktop notifications, a clipboard tool for X11 and for Wayland, and the two
+    #       pieces the Wayland main-computer helper uses: the system Python's GObject support and libei)
     local PM="" PKGS="" INSTALL=""
     if command -v apt-get >/dev/null 2>&1; then
-        PM=apt;    PKGS="libxcb-cursor0 libnotify-bin xclip wl-clipboard"
+        PM=apt;    PKGS="libxcb-cursor0 libnotify-bin xclip wl-clipboard python3-gi libei1"
         INSTALL="sudo apt-get -o DPkg::Lock::Timeout=180 install -y"      # wait if the system updater is busy
     elif command -v dnf >/dev/null 2>&1; then
-        PM=dnf;    PKGS="xcb-util-cursor libnotify xclip wl-clipboard";  INSTALL="sudo dnf install -y"
+        PM=dnf;    PKGS="xcb-util-cursor libnotify xclip wl-clipboard python3-gobject libei";  INSTALL="sudo dnf install -y"
     elif command -v pacman >/dev/null 2>&1; then
-        PM=pacman; PKGS="xcb-util-cursor libnotify xclip wl-clipboard";  INSTALL="sudo pacman -S --needed --noconfirm"
+        PM=pacman; PKGS="xcb-util-cursor libnotify xclip wl-clipboard python-gobject libei";  INSTALL="sudo pacman -S --needed --noconfirm"
     elif command -v zypper >/dev/null 2>&1; then
-        PM=zypper; PKGS="libxcb-cursor0 libnotify-tools xclip wl-clipboard"; INSTALL="sudo zypper --non-interactive install"
+        PM=zypper; PKGS="libxcb-cursor0 libnotify-tools xclip wl-clipboard python3-gobject libei1"; INSTALL="sudo zypper --non-interactive install"
     fi
 
     # (grep reads to the end on purpose: with 'pipefail', a grep that stops early makes the whole test fail at random)
     have_cursor_lib() { ldconfig -p 2>/dev/null | grep 'libxcb-cursor\.so\.0' >/dev/null || ls /usr/lib*/libxcb-cursor.so.0 /usr/lib/*/libxcb-cursor.so.0 >/dev/null 2>&1; }
     have_clip_tool()  { command -v xclip >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1; }
+    # only matters on Wayland: can the desktop's input capture be used (to be the main computer)?
+    have_capture_bits() {
+        [ "${XDG_SESSION_TYPE:-}" != "wayland" ] && return 0
+        /usr/bin/python3 -c 'import gi' >/dev/null 2>&1 && { ldconfig -p 2>/dev/null | grep 'libei\.so' >/dev/null || ls /usr/lib*/libei.so.* /usr/lib/*/libei.so.* >/dev/null 2>&1; }
+    }
 
-    if ! have_cursor_lib || ! command -v xclip >/dev/null 2>&1 || ! command -v wl-paste >/dev/null 2>&1 || ! command -v notify-send >/dev/null 2>&1; then
+    if ! have_cursor_lib || ! command -v xclip >/dev/null 2>&1 || ! command -v wl-paste >/dev/null 2>&1 || ! command -v notify-send >/dev/null 2>&1 || ! have_capture_bits; then
         if [ -n "$PM" ]; then
             echo "==> Need sudo now: installing what AirShare needs ($PKGS)"
             $INSTALL $PKGS || echo "    ($PM reported a problem; checking what is actually there)"
@@ -156,8 +161,9 @@ DESKTOP
     esac
     if [ "$session" = "wayland" ]; then
         if [ -w /dev/uinput ]; then
-            echo "  - This is a Wayland session. Another machine can drive this one. It can't be the main computer"
-            echo "    yet (the one whose keyboard and mouse you share); choose an X11 or Windows machine for that."
+            echo "  - This is a Wayland session. Another machine can drive this one. It can also be the main computer"
+            echo "    (the one whose keyboard and mouse you share) on GNOME 45 or newer and KDE Plasma 6.1 or newer;"
+            echo "    the desktop may ask your permission the first time."
         else
             echo "  - This is a Wayland session, and AirShare could not get access to /dev/uinput, so this machine"
             echo "    can't be driven yet. Logging out and in again may be all it needs; otherwise re-run this installer."

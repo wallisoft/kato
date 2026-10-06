@@ -7,8 +7,9 @@ neighbour and it carries on onto that machine, keyboard and scrolling
 included. Push it back and it comes home. The layout is shared by the whole
 group: change it on any machine and every machine follows. No master.
 
-X11 and Windows can be the main computer. A Wayland machine can be driven (through
-virtual input devices, see airshare_uinput.py) but can't be the main computer yet.
+X11, Windows and Wayland. A Wayland machine is driven through virtual input devices
+(airshare_uinput.py), and is the main computer through the desktop's own input-capture
+service (airshare_capture.py), which recent GNOME and KDE provide.
 Discovery, trust and TLS come from clickboard_core (passphrase mode for now).
 
   Emergency: Scroll Lock, or Esc three times quickly, brings the pointer home.
@@ -38,7 +39,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -47,6 +48,7 @@ RETURN_KEY = keyboard.Key.scroll_lock
 ESCAPE_PRESSES, ESCAPE_WINDOW = 3, 1.2
 ALIVE_EVERY, ALIVE_TIMEOUT = 1.0, 3.0
 LAYOUT_EVERY = 5                      # re-share layout and screen size so late joiners pick them up
+LAYOUT_TRUST_FROM = "0.9.0"           # layouts sent by machines older than this are not adopted (see on_frame)
 GRID = 4
 OPPOSITE = {"left": "right", "right": "left", "up": "down", "down": "up"}
 STEP = {"left": (0, -1), "right": (0, 1), "up": (-1, 0), "down": (1, 0)}
@@ -536,6 +538,10 @@ class AirShare(ClipboardSync, Mesh):
             threading.Thread(target=self._self_heal, daemon=True).start()
         self.uinput = None              # Wayland: the virtual mouse and keyboard we are driven through
         self.uinput_error = ""
+        self.capture = None             # Wayland: the desktop's input capture, when this is the main computer
+        self._two_mains_at = 0.0        # when another machine last tried to drive this main computer
+        self._enter_grace = 0.0         # Wayland: just arrived on another machine; don't bounce straight home
+        self._layout_ignored = set()    # older machines whose layouts we have declined (logged once each)
         self._ensure_uinput()
 
     def _ensure_uinput(self):
@@ -613,12 +619,14 @@ class AirShare(ClipboardSync, Mesh):
     def link_for(self, side):
         return self.link_to(self.neighbour(side))
 
-    def set_layout(self, cells, master, kvm=True, share=True):
+    def set_layout(self, cells, master, kvm=True, share=True, version=None):
         known = {**self.layout.get("hw", {}), **self.machine_hw, self.cfg.name: self.hw}
         hw = {n: known[n] for n in cells if known.get(n)}
-        self.layout = {"cells": cells, "master": master, "kvm": bool(kvm), "hw": hw, "version": time.time()}
+        self.layout = {"cells": cells, "master": master, "kvm": bool(kvm), "hw": hw,
+                       "version": time.time() if version is None else version}
         self._save_layout()
         self.apply_role()
+        self._home_if_stranded()
         if share:
             self.share_state()
         self.refresh_ui()
@@ -653,23 +661,83 @@ class AirShare(ClipboardSync, Mesh):
             new_cells[name] = new_cells.pop(placed)
             master = name if self.master() == placed else self.master()
             self.machine_hw[name] = list(hw)
-            self.set_layout(new_cells, master, self.kvm_on())
+            # Only a whisker newer than the layout it amends: enough to reach machines holding the same
+            # layout, never enough to beat a layout somebody actually saved later. (Stamping it "now" let a
+            # machine that had just been switched on push its stale grid, and its idea of the main computer,
+            # over everyone else's.)
+            self.set_layout(new_cells, master, self.kvm_on(), version=float(self.layout.get("version", 0)) + 0.001)
             log(f"{name} has taken {placed}'s place in the grid (same computer)")
             self.notify(f"{name} has taken {placed}'s place (same computer)")
             return
+
+    def _can_get_home(self):
+        """While driving another machine: is there still a path of neighbours from it back to this one?"""
+        cells, me = self.cells(), self.cfg.name
+        if self.active not in cells or me not in cells:
+            return False
+        seen, todo = {self.active}, [self.active]
+        while todo:
+            here = todo.pop()
+            for side in STEP:
+                nxt = self.neighbour_of(here, side)
+                if nxt == me:
+                    return True
+                if nxt and nxt not in seen:
+                    seen.add(nxt)
+                    todo.append(nxt)
+        return False
+
+    def _home_if_stranded(self):
+        """The grid changed while we were on another machine. If there is no longer a way to walk the pointer
+        back, every edge of that screen is a wall and this machine's keyboard and mouse would be stuck there."""
+        if self.active and not self._can_get_home():
+            log(f"the layout changed and {self.active} no longer leads back here: coming home")
+            threading.Thread(target=self._home_safely, daemon=True).start()
+
+    def _revive_capture(self):
+        """Wayland main computer: if the capture helper has stopped, start it again. Promptly when it had been
+        working (it was killed, or the desktop restarted), once a minute when it never got going (nothing is
+        likely to have changed, but an installed package or a newer desktop would fix it)."""
+        cap = self.capture
+        if not (WAYLAND and cap) or cap.running or not (self.is_master() and self.kvm_on()):
+            return
+        if time.time() - cap.stopped_at < (3 if cap.was_ready else 60):
+            return
+        log("Wayland: starting the capture helper again")
+        self.capture, self._input_on = None, False
+        self.apply_role()
 
     def layout_loop(self):
         while self.running:
             self.adopt_by_hardware(self.cfg.name, self.hw)
             self.share_state()
+            try:
+                self._revive_capture()
+            except Exception as exc:
+                log(f"couldn't restart the Wayland helper: {exc}")
             time.sleep(LAYOUT_EVERY)
 
     def apply_role(self):
         """Only the main computer listens to input. The others install no hooks at all."""
-        want = self.is_master() and self.kvm_on() and not WAYLAND
-        if WAYLAND and self.is_master() and self.kvm_on() and not getattr(self, "_wayland_warned", False):
-            self._wayland_warned = True
-            log("this machine runs Wayland: it can be driven, but it can't be the main computer yet")
+        want = self.is_master() and self.kvm_on()
+        if WAYLAND:
+            # Wayland hides the keyboard and mouse from ordinary programs; the desktop's own capture service
+            # stands in for the X11 listeners (see airshare_capture.py).
+            if want and not self.capture:
+                import importlib
+                cap = importlib.import_module("airshare_capture").WaylandCapture(self, log, BACK_OFF, (ESCAPE_PRESSES, ESCAPE_WINDOW))
+                self.capture = cap
+                if cap.start():
+                    self._input_on = True
+                    log("main computer (Wayland): asking the desktop to watch the screen edges")
+                else:
+                    log(f"Wayland: can't be the main computer: {cap.error}")
+            elif not want and self.capture:
+                self.go_home()
+                self.capture.stop()
+                self.capture, self._input_on = None, False
+                log("keyboard and mouse sharing off here: input listening off")
+            return
         if want and not self._input_on:
             self._start_input()
         elif not want and self._input_on:
@@ -705,7 +773,7 @@ class AirShare(ClipboardSync, Mesh):
         log("main computer: listening for the screen edges")
 
     def _check_edges(self, x, y):
-        if self.paused or self._busy:
+        if self.paused or self._busy or self.driven_by:      # being driven: that pointer movement isn't ours to act on
             return
         bx, by, bw, bh = self.bounds
         if x >= bx + bw - 1:
@@ -743,19 +811,23 @@ class AirShare(ClipboardSync, Mesh):
                 bx, by, bw, bh = self.bounds
                 self._home_side = home_side or "right"
                 self._centre = (bx + bw // 2, by + bh // 2)
-                self.mouse.position = self._centre
-                if LINUX:
+                if WAYLAND:
+                    pass                                      # the desktop has already handed us the input
+                elif LINUX:
+                    self.mouse.position = self._centre
                     if not self.xgrab.grab():
                         log("couldn't take the keyboard and pointer (another app has them): not crossing")
                         return
                 else:
+                    self.mouse.position = self._centre
                     self._grabs = [
                         mouse.Listener(on_move=self._g_move, on_click=self._g_click, on_scroll=self._g_scroll, suppress=True),
                         keyboard.Listener(on_press=self._g_press, on_release=self._g_release, suppress=True),
                     ]
                     for g in self._grabs:
                         g.start()
-                self.cursor.hide()
+                if not WAYLAND:
+                    self.cursor.hide()
             else:                                             # hopping between two other machines
                 self._exit_active()
             w, h = self.sizes[target]
@@ -785,20 +857,24 @@ class AirShare(ClipboardSync, Mesh):
                 return
             self._exit_active()
             self.active = None
-            if self.xgrab:
-                self.xgrab.release()
-            for g in self._grabs:
-                g.stop()
-            self._grabs = []
-            time.sleep(0.05)
-            bx, by, bw, bh = self.bounds
             r = 0.5 if ratio is None else min(max(float(ratio), 0.0), 1.0)
             side = self._home_side
-            self.mouse.position = {"right": (bx + bw - 1 - BACK_OFF, by + int(r * bh)),
-                                   "left": (bx + BACK_OFF, by + int(r * bh)),
-                                   "up": (bx + int(r * bw), by + BACK_OFF),
-                                   "down": (bx + int(r * bw), by + bh - 1 - BACK_OFF)}[side]
-            self.cursor.show()
+            if WAYLAND:
+                if self.capture:                              # hand the input back; the pointer returns inside our edge
+                    self.capture.release_home(side, r)
+            else:
+                if self.xgrab:
+                    self.xgrab.release()
+                for g in self._grabs:
+                    g.stop()
+                self._grabs = []
+                time.sleep(0.05)
+                bx, by, bw, bh = self.bounds
+                self.mouse.position = {"right": (bx + bw - 1 - BACK_OFF, by + int(r * bh)),
+                                       "left": (bx + BACK_OFF, by + int(r * bh)),
+                                       "up": (bx + int(r * bw), by + BACK_OFF),
+                                       "down": (bx + int(r * bw), by + bh - 1 - BACK_OFF)}[side]
+                self.cursor.show()
             log("back home")
         self.refresh_ui()
 
@@ -862,9 +938,10 @@ class AirShare(ClipboardSync, Mesh):
             ratio = (y / h) if side in ("left", "right") else (x / w)
             nxt = self.neighbour_of(name, side)
             if nxt == self.cfg.name:
-                self.go_home(ratio)
-                return
-            if nxt and self.link_to(nxt) and nxt in self.sizes:
+                if time.time() >= self._enter_grace:          # (a wobble in the first instant doesn't send us home)
+                    self.go_home(ratio)
+                    return
+            elif nxt and self.link_to(nxt) and nxt in self.sizes:
                 self.go_to(nxt, OPPOSITE[side], ratio)
                 return
             x, y = min(max(x, 0), w - 1), min(max(y, 0), h - 1)      # a wall: stay on this screen
@@ -939,6 +1016,17 @@ class AirShare(ClipboardSync, Mesh):
                     self.adopt_by_hardware(name, hw)
         elif t == "layout":
             theirs = header.get("layout") or {}
+            sender = self.peers.get(link.peer_id, {}).get("name", "")
+            if sender not in self.versions:
+                return                                        # it hasn't said which version it runs yet; it will resend
+            if vtuple(self.versions[sender]) < vtuple(LAYOUT_TRUST_FROM):
+                # Older AirShares could stamp a stale layout as brand new when a machine changed name, and
+                # push it over everyone's. Their layouts are left alone until they are updated.
+                if sender not in self._layout_ignored:
+                    self._layout_ignored.add(sender)
+                    log(f"not taking the layout from {sender or 'an older machine'} until it is updated "
+                        f"(it runs AirShare {self.versions.get(sender, 'an old version')})")
+                return
             if float(theirs.get("version", 0)) > float(self.layout.get("version", 0)):
                 self.layout = {"cells": dict(theirs.get("cells", {})), "master": theirs.get("master"),
                                "kvm": bool(theirs.get("kvm", True)), "hw": dict(theirs.get("hw", {})),
@@ -946,15 +1034,32 @@ class AirShare(ClipboardSync, Mesh):
                 self._save_layout()
                 log(f"layout updated by another machine (main computer: {self.master()})")
                 self.apply_role()
+                self._home_if_stranded()
                 self.refresh_ui()
         elif t == "kvm_alive":
             if self.active and self.link_to(self.active) is link:
                 self._last_alive = time.time()
         elif t == "kvm_leave":                                # a driven machine asks us to stop (locked, paused)
             if self.active and self.link_to(self.active) is link:
+                if self.capture:                              # Wayland: don't let the edge catch us straight back
+                    self.capture.refused(f"{self.active} handed control back")
                 threading.Thread(target=self._home_safely, daemon=True).start()
         # ---- being driven ----
         elif t == "kvm_enter":
+            if self.is_master() and self.kvm_on():
+                # Two machines each believe they are the main computer (their layouts disagree). If this one
+                # let itself be driven, each would capture the input the other injects and pass it straight back:
+                # an endless loop that locks both. Refuse, and say what to do.
+                link.send({"type": "kvm_leave"})
+                who = self.peers.get(link.peer_id, {}).get("name", "another machine")
+                if time.time() - self._two_mains_at > 20:
+                    log(f"{who} tried to take control, but this machine is set as the main computer too: "
+                        f"refused. Open Layout on the one you want as main and press Save.")
+                    self.notify(f"{who} and this machine are both set as the main computer. "
+                                f"Open Layout on the one you want as main and press Save.")
+                self._two_mains_at = time.time()
+                self.refresh_ui()
+                return
             if (input_blocked() and not SECURE_INPUT.present()) or self.paused:
                 link.send({"type": "kvm_leave"})
                 log("refused control: this machine is " + ("paused" if self.paused else "locked"))
@@ -1096,8 +1201,10 @@ class AirShare(ClipboardSync, Mesh):
             return self.status
         if self.paused:
             return "Paused"
-        if WAYLAND and self.master() and self.is_master() and self.kvm_on():
-            return "Wayland: this machine can be driven, but can't be the main computer yet - choose another in Layout"
+        if time.time() - self._two_mains_at < 20:
+            return "Two machines are set as the main computer - open Layout on the one you want and press Save"
+        if WAYLAND and self.is_master() and self.kvm_on() and self.capture and self.capture.error:
+            return f"Wayland: can't be the main computer here - {self.capture.error}"
         if WAYLAND and not self.uinput and self.kvm_on():
             return "Wayland: run the AirShare installer again so this machine can be driven"
         if not self.master():
@@ -1636,6 +1743,8 @@ class Tray:
 
     def quit(self):
         self.app.leave_remote()
+        if self.app.capture:
+            self.app.capture.stop()
         self.app.stop()
         self.icon.hide()
         self.qapp.quit()
@@ -1663,6 +1772,12 @@ def main():
     set_app("AirShare", VERSION)
     C.DEFAULT_PORT, C.BEACON_PORT = PORT, BEACON_PORT
     C.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:                                          # a power cut can leave empty bytes in the log, which makes tools
+        raw = C.LOG_FILE.read_bytes()             # treat it as binary and refuse to show it: take them out
+        if b"\x00" in raw:
+            C.LOG_FILE.write_bytes(raw.replace(b"\x00", b""))
+    except Exception:
+        pass
     layout_file = C.CONFIG_DIR / "layout.json"
     layout = json.loads(layout_file.read_text()) if layout_file.exists() else {}
     if "cells" not in layout:
@@ -1689,6 +1804,14 @@ def main():
     threading.Thread(target=app.watch_clipboard, daemon=True).start()
     threading.Thread(target=app.update_loop, daemon=True).start()
     tray = Tray(app, qapp)
+    # Ctrl+C in a terminal (and a polite "please stop" from the system) quit properly: come home, let go of
+    # everything, then leave. Qt only lets Python notice such signals when Python gets a turn, hence the timer.
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: QTimer.singleShot(0, tray.quit))
+    tick = QTimer()
+    tick.timeout.connect(lambda: None)
+    tick.start(250)
     log(f"AirShare {VERSION} as '{app.cfg.name}', screen {app.bounds[2]}x{app.bounds[3]}")
     if not app._local_key or not app.cells() or not app.master():
         QTimer.singleShot(1500, tray.open_settings)

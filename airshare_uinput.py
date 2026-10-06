@@ -152,6 +152,40 @@ def build_keymap(layout="us", variant=""):
     return chars
 
 
+def build_levels(layout="us", variant=""):
+    """The other way round from build_keymap: {(kernel key code, level): character}, for working out which
+    character a physical key produces on this machine's layout (a Wayland main computer is told keys, not text)."""
+    path = ctypes.util.find_library("xkbcommon")
+    if not path:
+        raise RuntimeError("libxkbcommon is not installed")
+    xkb = ctypes.CDLL(path)
+    xkb.xkb_context_new.restype = ctypes.c_void_p
+    xkb.xkb_keymap_new_from_names.restype = ctypes.c_void_p
+    xkb.xkb_keymap_new_from_names.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RuleNames), ctypes.c_int]
+    xkb.xkb_keymap_key_get_syms_by_level.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
+                                                     ctypes.POINTER(ctypes.POINTER(ctypes.c_uint32))]
+    xkb.xkb_keysym_to_utf32.argtypes = [ctypes.c_uint32]
+    xkb.xkb_keysym_to_utf32.restype = ctypes.c_uint32
+    xkb.xkb_keymap_unref.argtypes = [ctypes.c_void_p]
+    xkb.xkb_context_unref.argtypes = [ctypes.c_void_p]
+    ctx = xkb.xkb_context_new(0)
+    names = _RuleNames(None, None, layout.encode(), variant.encode() or None, None)
+    keymap = xkb.xkb_keymap_new_from_names(ctx, ctypes.byref(names), 0) if ctx else None
+    if not keymap:
+        raise RuntimeError(f"xkbcommon doesn't know the layout '{layout}'")
+    levels = {}
+    syms = ctypes.POINTER(ctypes.c_uint32)()
+    for keycode in range(9, 256):
+        for level in range(4):
+            if xkb.xkb_keymap_key_get_syms_by_level(keymap, keycode, 0, level, ctypes.byref(syms)) == 1:
+                cp = xkb.xkb_keysym_to_utf32(syms[0])
+                if cp >= 32 and cp != 127:
+                    levels[(keycode - 8, level)] = chr(cp)
+    xkb.xkb_keymap_unref(keymap)
+    xkb.xkb_context_unref(ctx)
+    return levels
+
+
 class _Device:
     """One virtual input device."""
 

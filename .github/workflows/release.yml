@@ -88,13 +88,16 @@ jobs:
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads --enable-plugin=pyside6 \
             --include-module=pynput.keyboard._xorg --include-module=pynput.mouse._xorg \
-            --include-module=airshare_uinput \
+            --include-module=airshare_uinput --include-module=airshare_capture \
             --include-package=Xlib --output-dir=build airshare.py
       - name: Package
         run: |
           mv build/airshare.dist airshare
           python packaging/make_icon.py airshare/airshare.png
           cp packaging/THIRD-PARTY-NOTICES.txt airshare/
+          # The Wayland capture helper is run by the system Python, so it ships as a plain script next to the program.
+          cp airshare_capture_helper.py airshare/
+          test -f airshare/airshare_capture_helper.py && python3 -m py_compile airshare_capture_helper.py
           tar czf airshare-linux-x86_64.tar.gz airshare
           cp packaging/install.sh install.sh
       - uses: actions/upload-artifact@v4
@@ -124,7 +127,7 @@ jobs:
           name: AirShare ${{ needs.check.outputs.version }}
           body: |
             **Windows 10 and 11:** download `AirShare-Setup.exe` and run it.
-            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; a Wayland machine can be driven but not yet be the main computer):** `curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash`
+            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; X11 and Wayland):** `curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash`
           files: |
             **/AirShare-Setup.exe
             **/airshare-linux-x86_64.tar.gz
