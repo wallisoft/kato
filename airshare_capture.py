@@ -224,6 +224,9 @@ class WaylandCapture:
                 a._send(link, {"type": "kvm_scroll", "dx": ev.get("dx", 0), "dy": -ev.get("dy", 0)})
         elif e == "activated":
             self._activated(SIDE.get(ev.get("side"), ""), float(ev.get("x", 0)), float(ev.get("y", 0)), ev.get("zone"))
+        elif e == "stats":
+            self.log(f"Wayland: held the input for {ev.get('secs', 0)}s: {ev.get('motion', 0)} pointer and "
+                     f"{ev.get('keys', 0)} key events came from the desktop")
         elif e == "deactivated" or e == "disabled":
             self.forget_keys()
             if a.active:                                        # the desktop took the input back (a lock screen, say)

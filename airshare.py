@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBox
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -567,10 +567,18 @@ class AirShare(ClipboardSync, Mesh):
         self._outq.put((link, header))
 
     def _send_loop(self):
+        # One thread sends everything, in order. It must never die (nothing would be sent again, with no sign of
+        # it), and a send that hangs holds up every machine behind it, so both are caught and said out loud.
         while True:
             link, header = self._outq.get()
-            if link.alive:
-                link.send(header)
+            try:
+                if link.alive:
+                    t0 = time.time()
+                    link.send(header)
+                    if time.time() - t0 > 1.0:
+                        log(f"a send to another machine took {time.time() - t0:.1f}s: everything queued behind it waited")
+            except Exception as exc:
+                log(f"a send to another machine failed: {exc}")
 
     def notify(self, msg):
         log(msg)
@@ -836,6 +844,7 @@ class AirShare(ClipboardSync, Mesh):
                          "up": [ratio * w, 1], "down": [ratio * w, h - 2]}[entry_side]
             self.active = target
             self._last_alive = time.time()
+            self._ctl_since, self._ctl_moves = time.time(), 0
             link.send({"type": "kvm_enter"})
             link.send({"type": "kvm_pos", "x": int(self.vpos[0]), "y": int(self.vpos[1])})
             if not getattr(self, "_flushing", False):
@@ -855,6 +864,7 @@ class AirShare(ClipboardSync, Mesh):
         with self._switch_lock:
             if not self.active:
                 return
+            was, since, moves = self.active, getattr(self, "_ctl_since", time.time()), getattr(self, "_ctl_moves", 0)
             self._exit_active()
             self.active = None
             r = 0.5 if ratio is None else min(max(float(ratio), 0.0), 1.0)
@@ -875,7 +885,7 @@ class AirShare(ClipboardSync, Mesh):
                                        "up": (bx + int(r * bw), by + BACK_OFF),
                                        "down": (bx + int(r * bw), by + bh - 1 - BACK_OFF)}[side]
                 self.cursor.show()
-            log("back home")
+            log(f"back home ({time.time() - since:.0f}s on {was}, {moves} pointer updates sent)")
         self.refresh_ui()
 
     def _home_safely(self, ratio=None):
@@ -922,7 +932,13 @@ class AirShare(ClipboardSync, Mesh):
                     dx, dy = self._acc
                     self._acc = [0, 0]
                 if dx or dy:
-                    self._move_virtual(dx, dy)
+                    self._ctl_moves = getattr(self, "_ctl_moves", 0) + 1
+                    try:
+                        self._move_virtual(dx, dy)
+                    except Exception as exc:                  # never leave the input held with nothing forwarding it
+                        log(f"pointer forwarding failed, coming home to be safe: {exc}")
+                        threading.Thread(target=self._home_safely, daemon=True).start()
+                        return
                 time.sleep(FLUSH_EVERY)
         finally:
             self._flushing = False
@@ -1075,10 +1091,13 @@ class AirShare(ClipboardSync, Mesh):
             self.refresh_ui()
         elif t == "kvm_exit":
             if self.driven_by is link:
+                log(f"no longer being driven ({getattr(self, '_drv_moves', 0)} pointer updates received)")
+                self._drv_moves = 0
                 self._release_all()
                 self.driven_by = None
                 self.refresh_ui()
         elif t == "kvm_pos" and self.driven_by is link:
+            self._drv_moves = getattr(self, "_drv_moves", 0) + 1
             x, y = bx + int(header.get("x", 0)), by + int(header.get("y", 0))
             if WINDOWS:
                 try:
@@ -1191,6 +1210,8 @@ class AirShare(ClipboardSync, Mesh):
         if self.active and self.link_to(self.active) in (None, link):
             threading.Thread(target=self._home_safely, daemon=True).start()
         if self.driven_by is link:
+            log(f"the machine driving this one disconnected ({getattr(self, '_drv_moves', 0)} pointer updates received)")
+            self._drv_moves = 0
             self._release_all()
             self.driven_by = None
         Mesh.on_link_closed(self, link, why)
@@ -1760,6 +1781,10 @@ def send_to_running(cmd: str) -> bool:
 
 
 def main():
+    def thread_crashed(args):                                 # a background thread that dies must not die silently
+        log(f"internal error in a background thread ({getattr(args.thread, 'name', '?')}): "
+            f"{getattr(args.exc_type, '__name__', args.exc_type)}: {args.exc_value}")
+    threading.excepthook = thread_crashed
     ap = argparse.ArgumentParser(description="AirShare: one keyboard and mouse across your machines")
     ap.add_argument("--passphrase", help="shared passphrase (same on every machine, 8+ characters)")
     ap.add_argument("--name", help="this machine's name (default: its hostname)")

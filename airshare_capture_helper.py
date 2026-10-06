@@ -73,7 +73,9 @@ S = {"session": None, "zones": [], "zone_set": 0, "sides": [], "barriers": {}, "
 
 
 def call(method, params, reply=None):
-    return conn.call_sync(BUS, PATH, IFACE, method, params, reply, Gio.DBusCallFlags.NONE, -1, None)
+    # A time limit: with none, a desktop that doesn't answer freezes this helper for 25 seconds, and while it is
+    # frozen no input is read and neither the escape keys nor the heartbeat can hand the input back.
+    return conn.call_sync(BUS, PATH, IFACE, method, params, reply, Gio.DBusCallFlags.NONE, 4000, None)
 
 
 def request(method, build):
@@ -178,9 +180,17 @@ def switch_off(why, rest):
     GLib.timeout_add_seconds(rest, back)
 
 
+def stats():
+    """Say how much input the desktop actually delivered during the capture that is ending."""
+    if S.get("act_at"):
+        out(e="stats", secs=round(time.monotonic() - S["act_at"], 1), motion=S.get("n_m", 0), keys=S.get("n_k", 0))
+    S["act_at"] = 0.0
+
+
 def release(x=None, y=None):
     if S["activation"] is None:
         return
+    stats()
     aid, S["activation"] = S["activation"], None
     S["released_at"] = time.monotonic()
     opts = {"activation_id": GLib.Variant("u", aid)}
@@ -247,10 +257,12 @@ def on_ei(*_):
                                           ctypes.c_int(EI_CAP_SCROLL), ctypes.c_int(EI_CAP_BUTTON), P(None))
         elif t == 300:
             got_input = True
+            S["n_m"] = S.get("n_m", 0) + 1
             mx += lib.ei_event_pointer_get_dx(ev)
             my += lib.ei_event_pointer_get_dy(ev)
         elif t == 700:
             got_input = True
+            S["n_k"] = S.get("n_k", 0) + 1
             code, down = int(lib.ei_event_keyboard_get_key(ev)), bool(lib.ei_event_keyboard_get_key_is_press(ev))
             if down and S["activation"] is not None and code in (KEY_ESC, KEY_SCROLLLOCK):
                 now = time.monotonic()
@@ -301,6 +313,7 @@ def on_activated(_c, _s, _p, _i, _sig, params):
     _session, opts = params.unpack()
     now = time.monotonic()
     S["activation"], S["alive"], S["released_at"], S["esc"], S["orphan"] = opts.get("activation_id", 0), now, 0.0, [], 0.0
+    S["act_at"], S["n_m"], S["n_k"] = now, 0, 0
     S["captures"] = [t0 for t0 in S["captures"] if now - t0 < BOUNCE_WINDOW] + [now]
     if len(S["captures"]) >= BOUNCE_COUNT:
         S["captures"] = []
@@ -314,11 +327,13 @@ def on_activated(_c, _s, _p, _i, _sig, params):
 
 
 def on_deactivated(*_):
+    stats()
     S["activation"], S["released_at"] = None, 0.0
     out(e="deactivated")
 
 
 def on_disabled(*_):
+    stats()
     S["activation"], S["enabled"] = None, False
     out(e="disabled")
     GLib.timeout_add_seconds(2, rearm)
