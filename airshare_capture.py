@@ -80,17 +80,29 @@ class WaylandCapture:
         try:
             # In a session of its own: Ctrl+C in a terminal goes to everything started from it, and would
             # otherwise stop the helper while leaving AirShare running without one.
-            self.proc = subprocess.Popen([python, helper], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, start_new_session=True)
+            self.proc = subprocess.Popen([python, "-I", helper], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True, bufsize=1, env=env, start_new_session=True)
         except Exception as exc:
             self.error = f"couldn't start the Wayland helper: {exc}"
             self.stopped_at = time.time()
             return False
         self.running = True
+        self.last_err = ""
+        threading.Thread(target=self._read_errors, args=(self.proc,), daemon=True).start()
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._tend, daemon=True).start()
         threading.Thread(target=self._repeat, daemon=True).start()
         return True
+
+    def _read_errors(self, proc):
+        """Keep the last thing the helper said on its error output, so a helper that dies can say why."""
+        try:
+            for line in proc.stderr:
+                line = line.strip()
+                if line:
+                    self.last_err = line[:300]
+        except Exception:
+            pass
 
     def stop(self):
         self.running = False
@@ -156,7 +168,9 @@ class WaylandCapture:
                 self.running = False
                 self.stopped_at = time.time()
                 if not self.error:
-                    self.error = "the Wayland helper stopped"
+                    time.sleep(0.3)
+                    why = getattr(self, "last_err", "")
+                    self.error = "the Wayland helper stopped" + (f" ({why})" if why else "")
                 self.log(f"Wayland: {self.error}")
                 if self.app.active:
                     threading.Thread(target=self.app._home_safely, daemon=True).start()
