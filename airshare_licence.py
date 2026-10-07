@@ -38,10 +38,11 @@ def read_licence(key, public_key=PUBLIC_KEY):
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key)).verify(signature, payload)
         except InvalidSignature:
             return None
-        tier, computers, licence_id, issued = payload.decode("utf-8").split("|")
+        fields = payload.decode("utf-8").split("|")
+        tier, computers, licence_id, issued = fields[:4]          # later keys may carry more after these four
         if tier != "pro" or int(computers) < 1:
             return None
-        return {"computers": int(computers), "id": licence_id, "issued": issued, "key": key}
+        return {"computers": int(computers), "id": licence_id, "issued": issued, "key": key, "extra": fields[4:]}
     except Exception:
         return None
 

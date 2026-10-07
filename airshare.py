@@ -31,10 +31,10 @@ import threading
 import time
 
 from pynput import keyboard, mouse
-from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
-                               QMessageBox, QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QTextOption
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+                               QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
@@ -42,7 +42,7 @@ from clickboard_core import common as C
 import airshare_licence as licence
 from airshare_files import BigFiles
 
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -1680,8 +1680,90 @@ class GridWidget(QWidget):
         self.update()
 
 
+def edge_colours(widget):
+    """The frame colour and a fainter one for disabled things: dark grey on a light desktop, lighter on a dark one."""
+    dark = widget.palette().window().color().lightness() < 128
+    return ("#9a9a9a", "#666666") if dark else ("#555555", "#b5b5b5")
+
+
+def button_style(widget):
+    edge, faint = edge_colours(widget)
+    return (f"QPushButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 5px 14px; background: palette(button); }} "
+            "QPushButton:hover { background: palette(midlight); } QPushButton:pressed { background: palette(mid); } "
+            f"QPushButton:disabled {{ color: {faint}; border-color: {faint}; }}")
+
+
+class Framed:
+    """Mixed into every AirShare window and pop-up: draws a thin, slightly rounded frame just inside the edge.
+    On a white desktop a white window otherwise has no visible boundary at all."""
+    RADIUS = 8
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(edge_colours(self)[0]), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
+        painter.end()
+
+
+class Box(Framed, QMessageBox):
+    def __init__(self, parent=None, title="AirShare", text="", icon=QMessageBox.NoIcon):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setText(text)
+        self.setIcon(icon)
+        self.setStyleSheet(button_style(self))
+
+
+def tell(parent, text, title="AirShare", icon=QMessageBox.Information):
+    Box(parent, title, text, icon).exec()
+
+
+def ask(parent, text, title="AirShare"):
+    box = Box(parent, title, text, QMessageBox.Question)
+    yes = box.addButton("Yes", QMessageBox.YesRole)
+    box.setDefaultButton(box.addButton("No", QMessageBox.NoRole))
+    box.exec()
+    return box.clickedButton() is yes
+
+
+class KeyDialog(Framed, QDialog):
+    """Where a licence key is pasted. A key is one long unbroken run of characters, so it wraps anywhere."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AirShare Pro")
+        self.setStyleSheet(button_style(self))
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.addWidget(QLabel("Paste the licence key from your email:"))
+        self.edit = QPlainTextEdit()
+        mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        self.edit.setFont(mono)
+        self.edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.edit.setWordWrapMode(QTextOption.WrapAnywhere)
+        self.edit.setTabChangesFocus(True)
+        metrics = self.edit.fontMetrics()
+        self.edit.setFixedSize(metrics.horizontalAdvance("M") * 46 + 28, metrics.lineSpacing() * 4 + 18)
+        v.addWidget(self.edit)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        v.addLayout(row)
+
+    def key(self):
+        return self.edit.toPlainText()
+
+
 def about_dialog(parent=None):
-    box = QMessageBox(parent)
+    box = Box(parent)
     box.setWindowTitle("About AirShare")
     box.setTextFormat(Qt.RichText)
     box.setText(
@@ -1699,16 +1781,16 @@ def about_dialog(parent=None):
 
 def enter_licence_dialog(app, parent=None):
     """Ask for a licence key and apply it. True if a genuine key was entered."""
-    text, ok = QInputDialog.getMultiLineText(parent, "AirShare Pro", "Paste the licence key from your email:")
-    if not ok or not text.strip():
+    dialog = KeyDialog(parent)
+    if dialog.exec() != QDialog.Accepted or not dialog.key().strip():
         return False
-    info = app.set_licence(text)
+    info = app.set_licence(dialog.key())
     if not info:
-        QMessageBox.warning(parent, "AirShare", "That isn't a valid AirShare licence key.\n\n"
-                            "Paste the whole key from your email. It starts with ASP1-.")
+        tell(parent, "That isn't a valid AirShare licence key.\n\n"
+             "Paste the whole key from your email. It starts with ASP1-.", icon=QMessageBox.Warning)
         return False
-    QMessageBox.information(parent, "AirShare Pro", f"AirShare Pro is active for up to {info['computers']} computers.\n\n"
-                            "Your other computers will pick it up by themselves.")
+    tell(parent, f"AirShare Pro is active for up to {info['computers']} computers.\n\n"
+         "Your other computers will pick it up by themselves.", "AirShare Pro")
     return True
 
 
@@ -1721,8 +1803,7 @@ def licence_dialog(app, parent=None):
     issued = info.get("issued", "")
     if len(issued) == 8 and issued.isdigit():
         issued = f"{issued[6:8]}/{issued[4:6]}/{issued[0:4]}"
-    box = QMessageBox(parent)
-    box.setWindowTitle("AirShare Pro")
+    box = Box(parent, "AirShare Pro")
     box.setTextFormat(Qt.RichText)
     box.setTextInteractionFlags(Qt.TextSelectableByMouse)
     box.setText(f"<b>AirShare Pro</b>: up to {info['computers']} computers<br>"
@@ -1739,11 +1820,8 @@ def licence_dialog(app, parent=None):
     elif clicked is change:
         enter_licence_dialog(app, parent)
     elif clicked is remove:
-        sure = QMessageBox.question(
-            parent, "AirShare", "Remove the licence key from all your computers and go back to AirShare Free "
-            f"(up to {licence.FREE_COMPUTERS} computers)?\n\nKeep a copy of the key: you can enter it again at any time.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if sure == QMessageBox.Yes:
+        if ask(parent, "Remove the licence key from all your computers and go back to AirShare Free "
+               f"(up to {licence.FREE_COMPUTERS} computers)?\n\nKeep a copy of the key: you can enter it again at any time."):
             app.remove_licence()
 
 
@@ -1751,7 +1829,7 @@ def view_log():
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(C.LOG_FILE)))
 
 
-class SettingsWindow(QWidget):
+class SettingsWindow(Framed, QWidget):
     def __init__(self, app: AirShare, extras=None):
         super().__init__()
         self.app = app
@@ -1760,20 +1838,8 @@ class SettingsWindow(QWidget):
         body = QWidget()
         v = QVBoxLayout(body)
         outer = QVBoxLayout(self)
-        # A thin frame round the window and round its buttons: on a white desktop a white window with white
-        # buttons has no visible edge at all.
-        edge = "#9a9a9a" if self.palette().window().color().lightness() < 128 else "#555555"
-        faint = "#666666" if edge == "#9a9a9a" else "#b5b5b5"
-        outer.setContentsMargins(1, 1, 1, 1)
-        self.setObjectName("airshareWindow")
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        body.setObjectName("airshareBody")
-        body.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"#airshareWindow {{ background: {edge}; }} #airshareBody {{ background: palette(window); }} "
-            f"QPushButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 5px 14px; background: palette(button); }} "
-            "QPushButton:hover { background: palette(midlight); } QPushButton:pressed { background: palette(mid); } "
-            f"QPushButton:disabled {{ color: {faint}; border-color: {faint}; }}")
+        outer.setContentsMargins(4, 4, 4, 4)                     # room for the rounded frame Framed draws
+        self.setStyleSheet(button_style(self))
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -1928,21 +1994,19 @@ class SettingsWindow(QWidget):
     def save(self):
         passphrase = self.passphrase.text().strip()
         if len(passphrase) < MIN_PASSPHRASE:
-            QMessageBox.warning(self, "AirShare", f"The passphrase needs at least {MIN_PASSPHRASE} characters.")
+            tell(self, f"The passphrase needs at least {MIN_PASSPHRASE} characters.", icon=QMessageBox.Warning)
             return
         if self.app.cfg.name not in self.grid.cells:
-            QMessageBox.warning(self, "AirShare", "Place this machine in the grid too, so AirShare knows where it sits.")
+            tell(self, "Place this machine in the grid too, so AirShare knows where it sits.", icon=QMessageBox.Warning)
             return
         master = self.master_box.currentText()
         if master not in self.grid.cells:
-            QMessageBox.warning(self, "AirShare", f"Place the main computer ({master}) in the grid too.")
+            tell(self, f"Place the main computer ({master}) in the grid too.", icon=QMessageBox.Warning)
             return
         allowed, placed = self.app.allowed_computers(), len(self.grid.cells)
         if placed > allowed:
             pro = self.app.licence_info()
-            box = QMessageBox(self)
-            box.setWindowTitle("AirShare")
-            box.setIcon(QMessageBox.Information)
+            box = Box(self, icon=QMessageBox.Information)
             box.setText(f"You have placed {placed} computers.\n\n" + (
                 f"Your licence covers up to {allowed}." if pro else
                 f"AirShare Free shares a keyboard and mouse between up to {licence.FREE_COMPUTERS} computers. "
