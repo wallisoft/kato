@@ -110,7 +110,11 @@ def inject(cmd):
     elif kind == "key":
         inp = INPUT(type=INPUT_KEYBOARD)
         if cmd.get("vk"):                                             # a real virtual key (Enter, arrows...)
-            inp.u.ki = KEYBDINPUT(int(cmd["vk"]), 0, (0x0002 if not cmd.get("down") else 0), 0, None)
+            vk = int(cmd["vk"])
+            # arrows, Home/End, Insert/Delete, PageUp/Down and the Windows/menu keys are "extended" keys;
+            # without saying so, Shift+arrow and friends misbehave
+            ext = 0x0001 if (0x21 <= vk <= 0x28 or vk in (0x2D, 0x2E, 0x5B, 0x5C, 0x5D)) else 0
+            inp.u.ki = KEYBDINPUT(vk, 0, ext | (0x0002 if not cmd.get("down") else 0), 0, None)
         else:                                                        # a character, by Unicode scan code
             flags = 0x0004 | (0 if cmd.get("down") else 0x0002)      # UNICODE | (KEYUP)
             inp.u.ki = KEYBDINPUT(0, int(cmd.get("char", 0)), flags, 0, None)

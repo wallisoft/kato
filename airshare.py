@@ -31,8 +31,8 @@ import threading
 import time
 
 from pynput import keyboard, mouse
-from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
 
@@ -41,7 +41,7 @@ from clickboard_core import common as C
 
 from airshare_files import BigFiles
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -185,6 +185,71 @@ def input_blocked() -> bool:
         return True                                 # the secure desktop is showing
     u.CloseDesktop(h)
     return False
+
+
+_elevated = {"at": 0.0, "is": False}
+
+
+def elevated_target() -> bool:
+    """True when the window in front, or the one under the pointer, belongs to a program running as
+    administrator. Windows silently drops input that an ordinary program sends to those, so it has to go
+    through the input service instead (when that is installed)."""
+    if platform.system() != "Windows":
+        return False
+    now = time.time()
+    if now - _elevated["at"] < 0.25:
+        return _elevated["is"]
+    _elevated["at"], found = now, False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u, k, a = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.advapi32
+        u.GetForegroundWindow.restype = ctypes.c_void_p
+        u.WindowFromPoint.restype = ctypes.c_void_p
+        u.WindowFromPoint.argtypes = [wintypes.POINT]
+        u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        k.OpenProcess.restype = ctypes.c_void_p
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k.CloseHandle.argtypes = [ctypes.c_void_p]
+        a.OpenProcessToken.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+        a.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                          ctypes.POINTER(wintypes.DWORD)]
+        pt = wintypes.POINT()
+        u.GetCursorPos(ctypes.byref(pt))
+        for hwnd in {u.GetForegroundWindow(), u.WindowFromPoint(pt)}:
+            if not hwnd or found:
+                continue
+            pid = wintypes.DWORD(0)
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not pid.value or pid.value == os.getpid():
+                continue
+            h = k.OpenProcess(0x1000, False, pid.value)              # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                found = True                                         # can't even look at it: it is above us
+                continue
+            try:
+                token = ctypes.c_void_p()
+                if not a.OpenProcessToken(h, 0x0008, ctypes.byref(token)):   # TOKEN_QUERY
+                    found = True
+                    continue
+                try:
+                    elevated, size = wintypes.DWORD(0), wintypes.DWORD(0)
+                    if a.GetTokenInformation(token, 20, ctypes.byref(elevated), 4, ctypes.byref(size)) and elevated.value:
+                        found = True                                 # TokenElevation
+                finally:
+                    k.CloseHandle(token)
+            finally:
+                k.CloseHandle(h)
+    except Exception:
+        found = False
+    _elevated["is"] = found
+    return found
+
+
+def needs_service() -> bool:
+    """Input that only the Windows input service can deliver: the lock screen and security prompts, and any
+    window belonging to a program running as administrator."""
+    return input_blocked() or elevated_target()
 
 
 def ensure_pointer_visible() -> bool:
@@ -516,6 +581,8 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         self.machine_hw = {}            # machine name -> its addresses, as reported
         self._stand_in = False          # Windows: our own pointer is showing (Windows hid its own)
         self.latest = None              # newest release on GitHub, once checked
+        self._check_now = False         # look for an update at the next opportunity (the settings window opened)
+        self._sec_mods, self._sec_down = set(), {}   # Windows input service: shortcut keys held, keys it has down
         # main-computer state
         self.active = None              # name of the machine being driven, or None when at home
         self.vpos = [0, 0]              # virtual pointer on the active machine's screen
@@ -1075,9 +1142,9 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
                 who = self.peers.get(link.peer_id, {}).get("name", "another machine")
                 if time.time() - self._two_mains_at > 20:
                     log(f"{who} tried to take control, but this machine is set as the main computer too: "
-                        f"refused. Open Layout on the one you want as main and press Save.")
+                        f"refused. Open Layout on the one you want as main and press Apply.")
                     self.notify(f"{who} and this machine are both set as the main computer. "
-                                f"Open Layout on the one you want as main and press Save.")
+                                f"Open Layout on the one you want as main and press Apply.")
                 self._two_mains_at = time.time()
                 self.refresh_ui()
                 return
@@ -1106,7 +1173,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             x, y = bx + int(header.get("x", 0)), by + int(header.get("y", 0))
             if WINDOWS:
                 try:
-                    if input_blocked() and SECURE_INPUT.send({"t": "move", "x": x, "y": y}):
+                    if needs_service() and SECURE_INPUT.send({"t": "move", "x": x, "y": y}):
                         return
                     win_move_abs(x, y)
                     hidden = win_cursor_hidden()
@@ -1125,7 +1192,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             if self.uinput:
                 self.uinput.button(name, bool(header.get("down")))
                 return
-            if WINDOWS and input_blocked() and SECURE_INPUT.send(
+            if WINDOWS and needs_service() and SECURE_INPUT.send(
                     {"t": "btn", "button": name, "down": bool(header.get("down"))}):
                 return
             btn = getattr(mouse.Button, name, None)
@@ -1133,7 +1200,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
                 (self.mouse.press if header.get("down") else self.mouse.release)(btn)
         elif t == "kvm_scroll" and self.driven_by is link:
             dx, dy = int(header.get("dx", 0)), int(header.get("dy", 0))
-            if WINDOWS and input_blocked() and SECURE_INPUT.send({"t": "scroll", "dx": dx, "dy": dy}):
+            if WINDOWS and needs_service() and SECURE_INPUT.send({"t": "scroll", "dx": dx, "dy": dy}):
                 return
             if self.uinput:
                 self.uinput.scroll(dx, dy)
@@ -1150,7 +1217,9 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             if k is None:
                 return
             ident = json.dumps(header.get("key"), sort_keys=True)
-            if WINDOWS and input_blocked() and self._secure_key(header.get("key") or {}, bool(header.get("down"))):
+            # a key comes up by the same route it went down, even if the window in front has changed since
+            if WINDOWS and ((needs_service() and ident not in self._held_keys) or ident in self._sec_down) \
+                    and self._secure_key(header.get("key") or {}, bool(header.get("down")), ident):
                 return
             try:
                 if header.get("down"):
@@ -1171,17 +1240,46 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
            "caps_lock": 0x14, "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
            "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B}
 
-    def _secure_key(self, wire, down):
-        """Relay one key press/release to the secure-desktop service. wire is the on-the-wire key dict:
-        {"name": "enter"} a named key, {"char": "a"} a character, or {"vk": 65} a raw virtual key."""
+    _SHORTCUT_KEYS = (0x11, 0x12, 0x5B, 0x5C)                       # Ctrl, Alt, either Windows key
+
+    def _secure_key(self, wire, down, ident=""):
+        """Relay one key press/release to the input service. wire is the on-the-wire key dict:
+        {"name": "enter"} a named key, {"char": "a"} a character, or {"vk": 65} a raw virtual key.
+
+        Characters are normally typed as themselves, which is right whatever keyboard layout this machine has.
+        But Windows only recognises a shortcut (Ctrl+C, Alt+F...) from a real key code, so while Ctrl, Alt or a
+        Windows key is held the character goes as the key that produces it here. A key goes up the same way it
+        went down, whatever has been released in between."""
+        if not down and ident in self._sec_down:
+            return SECURE_INPUT.send(dict(self._sec_down.pop(ident), down=False))
+        cmd = None
         if "name" in wire:
-            vk = self._VK.get(str(wire["name"]).lower())
-            return SECURE_INPUT.send({"t": "key", "vk": vk, "down": down}) if vk else False
-        if "char" in wire and wire["char"]:
-            return SECURE_INPUT.send({"t": "key", "char": ord(wire["char"][0]), "down": down})
-        if "vk" in wire:
-            return SECURE_INPUT.send({"t": "key", "vk": int(wire["vk"]), "down": down})
-        return False
+            name = str(wire["name"]).lower()
+            vk = self._VK.get(name)
+            if name.startswith(("ctrl", "alt", "cmd")) and name != "alt_gr":
+                (self._sec_mods.add if down else self._sec_mods.discard)(name)
+            cmd = {"t": "key", "vk": vk} if vk else None
+        elif wire.get("char"):
+            ch = wire["char"][0]
+            cmd = {"t": "key", "char": ord(ch)}
+            try:
+                import ctypes
+                u = ctypes.windll.user32
+                held = {vk for vk in self._SHORTCUT_KEYS if u.GetAsyncKeyState(vk) & 0x8000}
+                alt_gr = 0x11 in held and 0x12 in held                # AltGr is Ctrl+Alt: that is typing, not a shortcut
+                if (held or self._sec_mods) and not alt_gr:
+                    found = u.VkKeyScanW(ord(ch)) & 0xFFFF
+                    if found != 0xFFFF and found & 0xFF:
+                        cmd = {"t": "key", "vk": found & 0xFF}
+            except Exception:
+                pass
+        elif "vk" in wire:
+            cmd = {"t": "key", "vk": int(wire["vk"])}
+        if cmd is None:
+            return False
+        if down and ident:
+            self._sec_down[ident] = cmd
+        return SECURE_INPUT.send(dict(cmd, down=down))
 
     def secure_available(self):
         return WINDOWS and SECURE_INPUT.present()
@@ -1210,6 +1308,10 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             except Exception:
                 pass
         self._held_keys.clear()
+        for cmd in list(self._sec_down.values()):                 # and anything the Windows input service has down
+            SECURE_INPUT.send(dict(cmd, down=False))
+        self._sec_down.clear()
+        self._sec_mods.clear()
 
     def on_link_closed(self, link, why):
         if self.active and self.link_to(self.active) in (None, link):
@@ -1230,7 +1332,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         if self.paused:
             return "Paused"
         if time.time() - self._two_mains_at < 20:
-            return "Two machines are set as the main computer - open Layout on the one you want and press Save"
+            return "Two machines are set as the main computer - open Layout on the one you want and press Apply"
         if WAYLAND and self.is_master() and self.kvm_on() and self.capture and self.capture.error:
             return f"Wayland: can't be the main computer here - {self.capture.error}"
         if WAYLAND and not self.uinput and self.kvm_on():
@@ -1247,6 +1349,10 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         behind = self.out_of_date()
         if behind:
             return "Update needed on: " + ", ".join(behind)
+        if self.update_available() or self.newer_peers():
+            newer = self.newer_peers()
+            return ("A newer AirShare is available" + (f" ({', '.join(newer)} already has it)" if newer else "")
+                    + ": open Layout and press Upgrade")
         if not self.kvm_on():
             return f"Clipboard sharing - {n} machine{'s' if n != 1 else ''} connected"
         role = "Main computer" if self.is_master() else f"Main computer: {self.master()}"
@@ -1265,15 +1371,24 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
     def update_available(self):
         return bool(self.latest) and vtuple(self.latest) > vtuple(VERSION)
 
+    def newer_peers(self):
+        """Machines on this network already running a newer AirShare than this one."""
+        return sorted(n for n, v in list(self.versions.items()) if vtuple(v) > vtuple(VERSION))
+
     def update_loop(self):
+        checked = 0.0
         while self.running:
-            v = latest_version()
-            if v:
-                self.latest = v
-                if self.update_available():
-                    log(f"update available: {v}")
-                self.refresh_ui()
-            time.sleep(UPDATE_CHECK_EVERY)
+            since = time.time() - checked
+            peers_ahead = any(vtuple(v) > vtuple(self.latest or VERSION) for v in list(self.versions.values()))
+            if since > UPDATE_CHECK_EVERY or (since > 60 and (self._check_now or peers_ahead)):
+                checked, self._check_now = time.time(), False
+                v = latest_version()
+                if v:
+                    if v != self.latest and vtuple(v) > vtuple(VERSION):
+                        log(f"update available: {v}")
+                    self.latest = v
+                    self.refresh_ui()
+            time.sleep(5)
 
     def upgrade(self):
         kind = install_kind()
@@ -1548,8 +1663,14 @@ class SettingsWindow(QWidget):
         self.status.setWordWrap(True)
         v.addWidget(self.status)
         buttons = QHBoxLayout()
+        links = QLabel('<a href="about">About AirShare</a> &nbsp;\u00b7&nbsp; <a href="https://airshare.eur.bz">'
+                       'airshare.eur.bz</a> &nbsp;\u00b7&nbsp; <a href="https://tiny-web.uk">tiny-web.uk</a>')
+        links.setTextFormat(Qt.RichText)
+        links.linkActivated.connect(self.follow_link)
+        buttons.addWidget(links)
         buttons.addStretch(1)
-        save = QPushButton("Save")
+        save = QPushButton("Apply")
+        save.setToolTip("Use this layout now and share it with your other machines. The window stays open.")
         save.setDefault(True)
         save.clicked.connect(self.save)
         close = QPushButton("Close")
@@ -1591,6 +1712,9 @@ class SettingsWindow(QWidget):
         kind = {"store": "Microsoft Store", "windows": "Windows installer", "linux": "Linux",
                 "source": "running from source"}[install_kind()]
         latest = a.latest or "checking..."
+        newer = a.newer_peers()
+        if newer and not a.update_available():                   # another machine has it before GitHub has told us
+            latest = f"{max((a.versions[n] for n in newer), key=vtuple)} (on {', '.join(newer)})"
         self.version_label.setText(f"This machine: <b>{VERSION}</b> ({kind}) \u00b7 Latest: <b>{latest}</b>")
         self.upgrade_btn.setVisible(a.update_available())
         self.upgrade_btn.setText("Open the Store" if install_kind() == "store" else f"Upgrade to {a.latest}")
@@ -1627,7 +1751,26 @@ class SettingsWindow(QWidget):
             self.app.cfg.mode, self.app.cfg.passphrase = "local", passphrase
             self.app.cfg.save()
             self.app.reset_for_mode_change()
-        self.status.setText("Saved, and shared with your other machines.")
+        self.status.setText("Applied, and shared with your other machines.")
+
+    def follow_link(self, link):
+        if link != "about":
+            QDesktopServices.openUrl(QUrl(link))
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("About AirShare")
+        box.setTextFormat(Qt.RichText)
+        box.setText(
+            f"<h3>AirShare {VERSION}</h3>"
+            "<p>One keyboard and mouse across all your computers, with a shared clipboard.<br>"
+            "Windows and Linux, X11 and Wayland. Free for up to three computers.</p>"
+            "<p>Created by Steve Wallis, Wallisoft.<br>"
+            "Designed and built with Claude, by Anthropic.</p>"
+            '<p><a href="https://airshare.eur.bz">airshare.eur.bz</a> &nbsp;\u00b7&nbsp; '
+            '<a href="https://tiny-web.uk">tiny-web.uk</a></p>'
+            "<p><small>The interface uses Qt under the LGPL; see the third-party notices installed with AirShare."
+            "</small></p>")
+        box.exec()
 
 
 class StandInPointer(QWidget):
@@ -1759,6 +1902,7 @@ class Tray:
             self.settings = SettingsWindow(self.app)
         else:
             self.settings.reload()
+        self.app._check_now = True                                # a good moment to look for an update
         self.settings.fit_to_screen()
         self.settings.show()
         self.settings.raise_()
