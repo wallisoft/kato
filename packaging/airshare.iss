@@ -34,7 +34,7 @@ Name: "custom"; Description: "Custom"; Flags: iscustom
 
 [Components]
 Name: "app"; Description: "AirShare"; Types: standard full custom; Flags: fixed
-Name: "secure"; Description: "Control this PC at the Windows login and security (UAC) screens.\nInstalls a background service (SYSTEM). For headless PCs with no keyboard or mouse of their own. Off by default."; Types: full
+Name: "secure"; Description: "Control this PC at the Windows lock screen and at security (UAC) prompts.\nInstalls a background service (SYSTEM) that only the installed AirShare can use. Off by default."; Types: full
 
 [Files]
 ; The whole compiled folder. Qt stays as separate, replaceable libraries (LGPL).
@@ -60,3 +60,15 @@ Filename: "{app}\service\airshare-service.exe"; Parameters: "remove"; Flags: run
 Filename: "{app}\airshare.exe"; Parameters: "--quit"; Flags: runhidden; RunOnceId: "QuitAirShare"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare (TCP 47810)"""; Flags: runhidden; RunOnceId: "DelTcp"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""AirShare discovery (UDP 47812)"""; Flags: runhidden; RunOnceId: "DelUdp"
+
+[Code]
+// Files that are in use can't be replaced: stop the input service and its agent before a new version is copied in.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  rc: Integer;
+begin
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop AirShareInput', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM airshare-service.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Sleep(700);
+  Result := '';
+end;

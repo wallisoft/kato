@@ -192,7 +192,7 @@ def stats():
     if S.get("act_at"):
         out(e="stats", secs=round(time.monotonic() - S["act_at"], 1), motion=S.get("n_m", 0), keys=S.get("n_k", 0))
         if S.get("n_m", 0) + S.get("n_k", 0):
-            S["strikes"] = 0
+            S["strikes"], S["strike_times"] = 0, []
     S["act_at"] = 0.0
 
 
@@ -381,15 +381,20 @@ def on_zones_changed(*_):
 def watchdog():
     if (S["activation"] is not None and S.get("act_at") and S.get("n_m", 0) + S.get("n_k", 0) == 0
             and time.monotonic() - S["act_at"] > 2.5):
-        S["strikes"] = S.get("strikes", 0) + 1
+        # Crossing and then keeping still looks exactly the same as a dead input channel, so one or two of these
+        # only hand the input back. Starting afresh (which makes the desktop ask permission again) takes three
+        # within a minute and a half with no working capture in between.
+        now_s = time.monotonic()
+        S["strike_times"] = [t0 for t0 in S.get("strike_times", []) if now_s - t0 < 90] + [now_s]
+        S["strikes"] = len(S["strike_times"])
         seen = ", ".join(f"{k}x{v}" for k, v in sorted(S.get("others", {}).items())) or "none"
         S["others"] = {}
         out(e="error", msg=f"the desktop took the keyboard and mouse but passed none of it on for 2.5 seconds "
                            f"(other messages from it: {seen}): handing them back")
         release()
         out(e="deactivated")
-        if S["strikes"] >= 2:
-            start_afresh("that happened twice running")
+        if S["strikes"] >= 3:
+            start_afresh("that happened three times running")
             return False
         return True
     if S["activation"] is not None and time.monotonic() - S["alive"] > HEARTBEAT_LIMIT:
