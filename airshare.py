@@ -42,7 +42,7 @@ from clickboard_core import common as C
 import airshare_licence as licence
 from airshare_files import BigFiles
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -583,8 +583,10 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         self._stand_in = False          # Windows: our own pointer is showing (Windows hid its own)
         self.latest = None              # newest release on GitHub, once checked
         self._check_now = False         # look for an update at the next opportunity (the settings window opened)
-        self._licence_key = self._load_licence()     # AirShare Pro: this machine's key, and any its neighbours hold
-        self._peer_licences = {}
+        # AirShare Pro: the group's licence key and when it was last changed. The newest change wins on every
+        # machine, so entering, changing or removing the key on one computer does the same on all of them.
+        self._licence_key, self._licence_at = self._load_licence()
+        self._licence_cache = (None, None)
         self._sec_mods, self._sec_down = set(), {}   # Windows input service: shortcut keys held, keys it has down
         # main-computer state
         self.active = None              # name of the machine being driven, or None when at home
@@ -715,42 +717,82 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
     def _save_layout(self):
         (C.CONFIG_DIR / "layout.json").write_text(json.dumps(self.layout, indent=2))
 
-    # ---- AirShare Pro: a licence entered on any one machine covers the whole group ----
+    # ---- AirShare Pro: one licence for the whole group; the newest change wins everywhere ----
     def _load_licence(self):
         try:
-            return (C.CONFIG_DIR / "licence.txt").read_text().strip()
+            saved = json.loads((C.CONFIG_DIR / "licence.json").read_text())
+            return licence.tidy(saved.get("key", "")), float(saved.get("at", 0))
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:                                              # 0.9.8 kept just the key
+            old = C.CONFIG_DIR / "licence.txt"
+            return licence.tidy(old.read_text()), old.stat().st_mtime
         except OSError:
-            return ""
+            return "", 0.0
+
+    def _save_licence(self):
+        try:
+            (C.CONFIG_DIR / "licence.json").write_text(json.dumps({"key": self._licence_key, "at": self._licence_at}))
+            (C.CONFIG_DIR / "licence.txt").unlink(missing_ok=True)
+        except OSError as exc:
+            log(f"couldn't save the licence key: {exc}")
 
     def licence_info(self):
-        """The best genuine licence this machine or any of its neighbours holds, or None (AirShare Free)."""
-        return licence.best([self._licence_key] + list(self._peer_licences.values()))
+        """What the group's licence says, or None (AirShare Free)."""
+        if self._licence_cache[0] != self._licence_key:
+            self._licence_cache = (self._licence_key, licence.read_licence(self._licence_key))
+        return self._licence_cache[1]
 
     def allowed_computers(self):
         info = self.licence_info()
         return info["computers"] if info else licence.FREE_COMPUTERS
 
+    def _licence_changed(self, key, at):
+        self._licence_key, self._licence_at = key, at
+        self._save_licence()
+        self.share_state()
+        self.refresh_ui()
+
     def set_licence(self, key):
-        """Take a licence key (typed in, or passed on by a neighbour). Returns what it says, or None if not genuine."""
+        """A licence key typed in here. Returns what it says, or None if it isn't genuine (nothing changes)."""
         info = licence.read_licence(key)
         if not info:
             return None
-        self._licence_key = info["key"]
-        try:
-            (C.CONFIG_DIR / "licence.txt").write_text(info["key"] + "\n")
-        except OSError as exc:
-            log(f"couldn't save the licence key: {exc}")
-        log(f"AirShare Pro licence accepted: up to {info['computers']} computers")
-        self.share_state()
-        self.refresh_ui()
+        log(f"AirShare Pro licence entered: up to {info['computers']} computers")
+        self._licence_changed(info["key"], max(time.time(), self._licence_at + 1))
         return info
+
+    def remove_licence(self):
+        """Back to AirShare Free, here and on the other computers."""
+        log("AirShare Pro licence removed: back to AirShare Free")
+        self._licence_changed("", max(time.time(), self._licence_at + 1))
+
+    def _licence_from_peer(self, header):
+        """A neighbour's view of the licence. Take it if it's newer than ours; put them right if ours is."""
+        if "licence" not in header:
+            return
+        theirs = licence.tidy(header.get("licence") or "")
+        try:
+            their_at = float(header.get("licence_at") or 0)
+        except (TypeError, ValueError):
+            their_at = 0.0
+        if theirs == self._licence_key:
+            self._licence_at = max(self._licence_at, their_at)
+            return
+        newer = their_at > self._licence_at
+        first = their_at == 0 and self._licence_at == 0 and not self._licence_key     # from a 0.9.8 machine
+        if (newer or first) and (theirs == "" or licence.read_licence(theirs)):
+            log("AirShare Pro licence " + ("picked up from" if theirs else "removed on") + " another computer")
+            self._licence_changed(theirs, their_at)
+        elif self._licence_at > their_at:
+            self.share_state()
 
     def share_state(self):
         bx, by, bw, bh = self.bounds
         for link in list(self.links.values()):
             if link.alive:
                 self._send(link, {"type": "screen", "name": self.cfg.name, "w": bw, "h": bh, "version": VERSION,
-                                  "hw": self.hw, "licence": (self.licence_info() or {}).get("key", "")})
+                                  "hw": self.hw, "licence": self._licence_key, "licence_at": self._licence_at})
                 if self.cells():
                     self._send(link, {"type": "layout", "layout": self.layout})
 
@@ -1131,11 +1173,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             if name:
                 self.sizes[name] = (int(header.get("w", 1920)), int(header.get("h", 1080)))
                 self.versions[name] = str(header.get("version", "old"))
-                passed_on = header.get("licence")
-                if passed_on and licence.read_licence(passed_on):
-                    self._peer_licences[name] = licence.tidy(passed_on)
-                    if not licence.read_licence(self._licence_key):
-                        self.set_licence(passed_on)         # keep it, so the group stays Pro whichever machines are on
+                self._licence_from_peer(header)
                 hw = [str(h).lower() for h in header.get("hw", []) if h]
                 if hw:
                     self.machine_hw[name] = hw
@@ -1372,9 +1410,9 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         if time.time() - self._two_mains_at < 20:
             return "Two machines are set as the main computer - open Layout on the one you want and press Apply"
         if WAYLAND and self.is_master() and self.kvm_on() and self.capture and self.capture.error:
-            return f"Wayland: can't be the main computer here - {self.capture.error}"
+            return "This computer can't share its keyboard and mouse at the moment (details in the log)"
         if WAYLAND and not self.uinput and self.kvm_on():
-            return "Wayland: run the AirShare installer again so this machine can be driven"
+            return "Run the AirShare installer again so this computer can be controlled"
         if not self.master():
             return "Choose the main computer in Layout"
         if self.active:
@@ -1642,15 +1680,100 @@ class GridWidget(QWidget):
         self.update()
 
 
+def about_dialog(parent=None):
+    box = QMessageBox(parent)
+    box.setWindowTitle("About AirShare")
+    box.setTextFormat(Qt.RichText)
+    box.setText(
+        f"<h3>AirShare {VERSION}</h3>"
+        "<p>One keyboard and mouse across all your computers, with a shared clipboard.<br>"
+        "Windows and Linux, X11 and Wayland. Free for up to three computers.</p>"
+        "<p>Created by Steve Wallis, Wallisoft.<br>"
+        "Designed and built with Claude, by Anthropic.</p>"
+        '<p><a href="https://airshare.eur.bz">airshare.eur.bz</a> &nbsp;\u00b7&nbsp; '
+        '<a href="https://tiny-web.uk">tiny-web.uk</a></p>'
+        "<p><small>The interface uses Qt under the LGPL; see the third-party notices installed with AirShare."
+        "</small></p>")
+    box.exec()
+
+
+def enter_licence_dialog(app, parent=None):
+    """Ask for a licence key and apply it. True if a genuine key was entered."""
+    text, ok = QInputDialog.getMultiLineText(parent, "AirShare Pro", "Paste the licence key from your email:")
+    if not ok or not text.strip():
+        return False
+    info = app.set_licence(text)
+    if not info:
+        QMessageBox.warning(parent, "AirShare", "That isn't a valid AirShare licence key.\n\n"
+                            "Paste the whole key from your email. It starts with ASP1-.")
+        return False
+    QMessageBox.information(parent, "AirShare Pro", f"AirShare Pro is active for up to {info['computers']} computers.\n\n"
+                            "Your other computers will pick it up by themselves.")
+    return True
+
+
+def licence_dialog(app, parent=None):
+    """Show the licence key, with the choice to copy it, change it, or remove it and go back to Free."""
+    info = app.licence_info()
+    if not info:
+        enter_licence_dialog(app, parent)
+        return
+    issued = info.get("issued", "")
+    if len(issued) == 8 and issued.isdigit():
+        issued = f"{issued[6:8]}/{issued[4:6]}/{issued[0:4]}"
+    box = QMessageBox(parent)
+    box.setWindowTitle("AirShare Pro")
+    box.setTextFormat(Qt.RichText)
+    box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    box.setText(f"<b>AirShare Pro</b>: up to {info['computers']} computers<br>"
+                f"Licence {info.get('id', '')}" + (f", issued {issued}" if issued else "")
+                + f"<p style='font-family:monospace'>{'<br>'.join(info['key'][i:i + 44] for i in range(0, len(info['key']), 44))}</p>")
+    copy = box.addButton("Copy key", QMessageBox.ActionRole)
+    change = box.addButton("Change key...", QMessageBox.ActionRole)
+    remove = box.addButton("Remove key", QMessageBox.DestructiveRole)
+    box.addButton("Close", QMessageBox.RejectRole)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is copy:
+        QApplication.clipboard().setText(info["key"])
+    elif clicked is change:
+        enter_licence_dialog(app, parent)
+    elif clicked is remove:
+        sure = QMessageBox.question(
+            parent, "AirShare", "Remove the licence key from all your computers and go back to AirShare Free "
+            f"(up to {licence.FREE_COMPUTERS} computers)?\n\nKeep a copy of the key: you can enter it again at any time.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if sure == QMessageBox.Yes:
+            app.remove_licence()
+
+
+def view_log():
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(C.LOG_FILE)))
+
+
 class SettingsWindow(QWidget):
-    def __init__(self, app: AirShare):
+    def __init__(self, app: AirShare, extras=None):
         super().__init__()
         self.app = app
+        self.extras = extras              # the tray's extra menu items, offered here on desktops with no tray
         self.setWindowTitle("AirShare - layout and settings")
         body = QWidget()
         v = QVBoxLayout(body)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        # A thin frame round the window and round its buttons: on a white desktop a white window with white
+        # buttons has no visible edge at all.
+        edge = "#9a9a9a" if self.palette().window().color().lightness() < 128 else "#555555"
+        faint = "#666666" if edge == "#9a9a9a" else "#b5b5b5"
+        outer.setContentsMargins(1, 1, 1, 1)
+        self.setObjectName("airshareWindow")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        body.setObjectName("airshareBody")
+        body.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"#airshareWindow {{ background: {edge}; }} #airshareBody {{ background: palette(window); }} "
+            f"QPushButton {{ border: 1px solid {edge}; border-radius: 6px; padding: 5px 14px; background: palette(button); }} "
+            "QPushButton:hover { background: palette(midlight); } QPushButton:pressed { background: palette(mid); } "
+            f"QPushButton:disabled {{ color: {faint}; border-color: {faint}; }}")
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
@@ -1698,38 +1821,52 @@ class SettingsWindow(QWidget):
         vrow.addWidget(self.upgrade_btn)
         v.addLayout(vrow)
 
-        lrow = QHBoxLayout()
         self.licence_label = QLabel()
-        self.buy_btn = QPushButton("Upgrade to Pro")
-        self.buy_btn.setToolTip("Opens the AirShare website. Pro is a one-off payment, with no subscription and no account.")
-        self.buy_btn.clicked.connect(lambda: webbrowser.open(licence.BUY_URL))
-        self.key_btn = QPushButton("Enter licence key")
-        self.key_btn.clicked.connect(self.enter_licence)
-        lrow.addWidget(self.licence_label, 1)
-        lrow.addWidget(self.buy_btn)
-        lrow.addWidget(self.key_btn)
-        v.addLayout(lrow)
+        v.addWidget(self.licence_label)
         self.status = QLabel()
         self.status.setWordWrap(True)
         v.addWidget(self.status)
         buttons = QHBoxLayout()
-        links = QLabel('<a href="about">About AirShare</a> &nbsp;\u00b7&nbsp; <a href="https://airshare.eur.bz">'
-                       'airshare.eur.bz</a> &nbsp;\u00b7&nbsp; <a href="https://tiny-web.uk">tiny-web.uk</a>')
-        links.setTextFormat(Qt.RichText)
-        links.linkActivated.connect(self.follow_link)
-        buttons.addWidget(links)
+        self.more_btn = QPushButton("More")                      # only where there is no tray menu to hold these
+        self.more_btn.clicked.connect(self.show_more)
+        self.more_btn.setVisible(bool(extras) and not QSystemTrayIcon.isSystemTrayAvailable())
+        buttons.addWidget(self.more_btn)
         buttons.addStretch(1)
-        save = QPushButton("Apply")
-        save.setToolTip("Use this layout now and share it with your other machines. The window stays open.")
-        save.setDefault(True)
-        save.clicked.connect(self.save)
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setToolTip("Use this layout now and share it with your other machines. The window stays open.")
+        self.apply_btn.setDefault(True)
+        self.apply_btn.clicked.connect(self.save)
         close = QPushButton("Close")
         close.clicked.connect(self.hide)
         buttons.addWidget(close)
-        buttons.addWidget(save)
+        buttons.addWidget(self.apply_btn)
         v.addLayout(buttons)
         self._dirty_names = None
         self.reload()
+        self.watch = QTimer(self)                                # Apply is only live when there is something to apply
+        self.watch.timeout.connect(self.update_apply)
+        self.watch.start(250)
+
+    def changed(self):
+        a = self.app
+        placed = lambda cells: {n: tuple(pos) for n, pos in cells.items()}
+        return (placed(self.grid.cells) != placed(a.cells())
+                or self.kvm_box.isChecked() != bool(a.kvm_on())
+                or (self.kvm_box.isChecked() and self.master_box.currentText() != (a.master() or a.cfg.name))
+                or self.passphrase.text().strip() != a.cfg.passphrase)
+
+    def update_apply(self):
+        if self.isVisible():
+            self.apply_btn.setEnabled(self.changed())
+
+    def show_more(self):
+        menu = QMenu(self)
+        for kind, text, enabled, action in (self.extras() if self.extras else []):
+            if kind == "sep":
+                menu.addSeparator()
+            else:
+                menu.addAction(text, action).setEnabled(enabled)
+        menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().topLeft()))
 
     def names(self):
         return sorted({self.app.cfg.name} | {p["name"] for p in self.app.peers.values()} | set(self.app.cells()),
@@ -1748,6 +1885,8 @@ class SettingsWindow(QWidget):
         self._dirty_names = self.names()
         self.show_version()
         self.status.setText(self.app.status_line())
+        if hasattr(self, "apply_btn"):
+            self.apply_btn.setEnabled(self.changed())
 
     def fit_to_screen(self):
         """Open at the size the content wants, but never taller than the screen (it scrolls instead)."""
@@ -1769,24 +1908,8 @@ class SettingsWindow(QWidget):
         self.upgrade_btn.setVisible(a.update_available())
         self.upgrade_btn.setText("Open the Store" if install_kind() == "store" else f"Upgrade to {a.latest}")
         pro = a.licence_info()
-        self.licence_label.setText(f"<b>AirShare Pro</b>: up to {pro['computers']} computers. Thank you." if pro
-                                   else f"AirShare Free: up to {licence.FREE_COMPUTERS} computers.")
-        self.buy_btn.setVisible(not pro)
-        self.key_btn.setVisible(not pro)
-
-    def enter_licence(self):
-        text, ok = QInputDialog.getMultiLineText(self, "AirShare Pro", "Paste the licence key from your email:")
-        if not ok or not text.strip():
-            return
-        info = self.app.set_licence(text)
-        if info:
-            QMessageBox.information(self, "AirShare Pro",
-                                    f"Thank you. AirShare Pro is active for up to {info['computers']} computers.\n\n"
-                                    "Your other computers will pick it up by themselves.")
-        else:
-            QMessageBox.warning(self, "AirShare", "That isn't a valid AirShare licence key.\n\n"
-                                "Paste the whole key from your email. It starts with ASP1-.")
-        self.show_version()
+        self.licence_label.setText(f"<b>AirShare Pro</b>: up to {pro['computers']} computers" if pro
+                                   else f"AirShare Free: up to {licence.FREE_COMPUTERS} computers")
 
     def tick(self):
         """Keep status fresh; add newly seen machines to the pool without disturbing edits."""
@@ -1824,14 +1947,15 @@ class SettingsWindow(QWidget):
                 f"Your licence covers up to {allowed}." if pro else
                 f"AirShare Free shares a keyboard and mouse between up to {licence.FREE_COMPUTERS} computers. "
                 "AirShare Pro covers up to 15, for a one-off payment."))
-            buy = None if pro else box.addButton("Upgrade to Pro", QMessageBox.AcceptRole)
+            buy = None if pro else box.addButton("Get Pro", QMessageBox.AcceptRole)
             key = box.addButton("Enter licence key", QMessageBox.ActionRole)
             box.addButton("Not now", QMessageBox.RejectRole)
             box.exec()
             if buy is not None and box.clickedButton() is buy:
                 webbrowser.open(licence.BUY_URL)
             elif box.clickedButton() is key:
-                self.enter_licence()
+                enter_licence_dialog(self.app, self)
+                self.show_version()
             return
         self.app.set_layout(dict(self.grid.cells), master, self.kvm_box.isChecked())
         self.grid.master = master
@@ -1840,25 +1964,7 @@ class SettingsWindow(QWidget):
             self.app.cfg.save()
             self.app.reset_for_mode_change()
         self.status.setText("Applied, and shared with your other machines.")
-
-    def follow_link(self, link):
-        if link != "about":
-            QDesktopServices.openUrl(QUrl(link))
-            return
-        box = QMessageBox(self)
-        box.setWindowTitle("About AirShare")
-        box.setTextFormat(Qt.RichText)
-        box.setText(
-            f"<h3>AirShare {VERSION}</h3>"
-            "<p>One keyboard and mouse across all your computers, with a shared clipboard.<br>"
-            "Windows and Linux, X11 and Wayland. Free for up to three computers.</p>"
-            "<p>Created by Steve Wallis, Wallisoft.<br>"
-            "Designed and built with Claude, by Anthropic.</p>"
-            '<p><a href="https://airshare.eur.bz">airshare.eur.bz</a> &nbsp;\u00b7&nbsp; '
-            '<a href="https://tiny-web.uk">tiny-web.uk</a></p>'
-            "<p><small>The interface uses Qt under the LGPL; see the third-party notices installed with AirShare."
-            "</small></p>")
-        box.exec()
+        self.apply_btn.setEnabled(False)
 
 
 class StandInPointer(QWidget):
@@ -1982,12 +2088,25 @@ class Tray:
         spec.append(("sep", "", False, None))
         if a.update_available():
             spec.append(("item", f"Update available: {a.latest}...", True, a.upgrade))
-        spec += [("item", "Layout and settings...", True, self.open_settings), ("item", "Quit", True, self.quit)]
+        spec.append(("item", "Layout and settings...", True, self.open_settings))
+        spec += self.extra_spec()
+        spec += [("sep", "", False, None), ("item", "Quit", True, self.quit)]
         return spec
+
+    def extra_spec(self):
+        """Licence, log and About: in the tray menu, and behind the window's More button where there is no tray."""
+        a = self.app
+        parent = lambda: self.settings if self.settings and self.settings.isVisible() else None
+        if a.licence_info():
+            spec = [("item", "View key...", True, lambda: licence_dialog(a, parent()))]
+        else:
+            spec = [("item", "Get Pro...", True, lambda: webbrowser.open(licence.BUY_URL)),
+                    ("item", "Enter key...", True, lambda: enter_licence_dialog(a, parent()))]
+        return spec + [("item", "View log", True, view_log), ("item", "About AirShare", True, lambda: about_dialog(parent()))]
 
     def open_settings(self):
         if not self.settings:
-            self.settings = SettingsWindow(self.app)
+            self.settings = SettingsWindow(self.app, self.extra_spec)
         else:
             self.settings.reload()
         self.app._check_now = True                                # a good moment to look for an update
