@@ -26,6 +26,7 @@ XFER_FROM = "0.9.4"                    # the first AirShare that can receive one
 OLD_FILES_MAX = C.FILES_MAX_TOTAL      # what older AirShares accept (sized for the shared connection)
 C.FILES_MAX_TOTAL = 200 * 1024 ** 3    # with its own connection, a copy can be far larger
 SPARE_DISK = 512 * 1024 ** 2           # never fill the receiving disk to the brim
+READERS = 8                            # files read at once (opening a file is the slow part on Windows)
 
 
 def _vt(v):
@@ -58,6 +59,7 @@ class BigFiles:
 
     def _xfer_init(self):
         self._xfer, self._xfer_wait, self._xfer_expect = None, {}, {}
+        self._xfer_batches, self._xfer_lock = {}, threading.Lock()
 
     def transfer_line(self):
         """What the tray should say while a large copy is on its way, or ''."""
@@ -77,51 +79,150 @@ class BigFiles:
                 self.refresh_ui()
 
     # ---- sending ----
+    # The core starts one of these per connected machine, all at once, for the same copy. They are gathered into
+    # one batch so the files are read ONCE and fed to every machine: on Windows, opening a file is the slow part
+    # (the virus scanner looks at each one first), and a folder of small files was being opened twice over.
     def _send_files(self, link, paths, total):
-        name = self.peers.get(link.peer_id, {}).get("name", "another machine")
         if total <= BIG_FILES_FROM:
             return ClipboardSync._send_files(self, link, paths, total)
-        if _vt(getattr(self, "versions", {}).get(name, "0")) < _vt(XFER_FROM):
-            if total <= OLD_FILES_MAX:
-                return ClipboardSync._send_files(self, link, paths, total)       # the old way, which it understands
-            self.notify(f"{name} needs AirShare {XFER_FROM} or newer to receive {human_size(total)}.")
-            log(f"not sending {human_size(total)} to {name}: it needs AirShare {XFER_FROM} or newer")
+        key = tuple(paths)
+        with self._xfer_lock:
+            batch = self._xfer_batches.get(key)
+            if batch is not None:
+                batch.append(link)
+                return
+            batch = self._xfer_batches[key] = [link]
+        time.sleep(0.4)                                           # let the other machines' threads join in
+        with self._xfer_lock:
+            self._xfer_batches.pop(key, None)
+        self._send_big(batch, list(paths), total)
+
+    def _send_big(self, links, paths, total):
+        name_of = lambda l: self.peers.get(l.peer_id, {}).get("name", "another machine")
+        size = human_size(total)
+        # 1. ask each machine (older AirShares get it the old way, or are told they need updating)
+        asked = []
+        for link in links:
+            name = name_of(link)
+            if _vt(getattr(self, "versions", {}).get(name, "0")) < _vt(XFER_FROM):
+                if total <= OLD_FILES_MAX:
+                    threading.Thread(target=ClipboardSync._send_files, args=(self, link, paths, total),
+                                     daemon=True).start()
+                else:
+                    self.notify(f"{name} needs AirShare {XFER_FROM} or newer to receive {size}.")
+                    log(f"not sending {size} to {name}: it needs AirShare {XFER_FROM} or newer")
+                continue
+            fid, answer = uuid.uuid4().hex, threading.Event()
+            self._xfer_wait[fid] = [answer, None]
+            link.send({"type": "xfer_offer", "id": fid, "total": total})
+            asked.append((link, fid, answer))
+        deadline, carriers = time.time() + 8, []
+        for link, fid, answer in asked:
+            name = name_of(link)
+            answered = answer.wait(max(deadline - time.time(), 0.1))
+            why = self._xfer_wait.pop(fid)[1]
+            if not answered or why:
+                why = why or "it didn't answer"
+                self.notify(f"{name} can't take {size} right now: {why}.")
+                log(f"not sending {size} to {name}: {why}")
+                continue
+            try:
+                sock = socket.create_connection((link.sock.getpeername()[0], self.peers[link.peer_id]["port"]), timeout=5)
+                tls = self.cli_ctx.wrap_socket(sock)
+                tls.settimeout(60)
+                carriers.append(TransferLink(tls, link.peer_id))
+                carriers[-1].name = name
+            except Exception as exc:
+                log(f"couldn't open a connection to {name} for {size}: {exc}")
+                self.notify(f"Sending {size} to {name} stopped: {exc}")
+        if not carriers:
             return
-        fid, answer = uuid.uuid4().hex, threading.Event()
-        self._xfer_wait[fid] = [answer, None]
-        link.send({"type": "xfer_offer", "id": fid, "total": total})
-        answered = answer.wait(8)
-        why = self._xfer_wait.pop(fid)[1]
-        if not answered or why:
-            why = why or "it didn't answer"
-            self.notify(f"{name} can't take {human_size(total)} right now: {why}.")
-            log(f"not sending {human_size(total)} to {name}: {why}")
-            return
-        started, tls = time.time(), None
+        # 2. read once, send to all of them
+        started = time.time()
+        names = ", ".join(c.name for c in carriers)
+        self._xfer = {"verb": "Sending", "name": names, "done": 0, "total": total, "shown": 0.0}
+        log(f"sending {size} to {names}, each on a connection of its own")
         try:
-            sock = socket.create_connection((link.sock.getpeername()[0], self.peers[link.peer_id]["port"]), timeout=5)
-            tls = self.cli_ctx.wrap_socket(sock)
-            tls.settimeout(60)
-            self._xfer = {"verb": "Sending", "name": name, "done": 0, "total": total, "shown": 0.0}
-            carrier = TransferLink(tls, link.peer_id, self._xfer_progress)
-            log(f"sending {human_size(total)} to {name} on a connection of its own")
-            ClipboardSync._send_files(self, carrier, paths, total)
-            if not carrier.alive:
-                raise ConnectionError(carrier.error or "the connection was lost")
-            recv_frame(tls)                                       # the other machine says it has everything
+            count = self._push(carriers, paths, total)
+            for c in carriers:
+                if c.alive:
+                    try:
+                        recv_frame(c.sock)                        # that machine says it has everything
+                    except Exception as exc:
+                        c.alive, c.error = False, str(exc)
             secs = max(time.time() - started, 0.1)
-            log(f"{name} has all {human_size(total)} (took {secs:.0f}s, {human_size(int(total / secs))} a second)")
-        except Exception as exc:
-            log(f"sending {human_size(total)} to {name} stopped: {exc}")
-            self.notify(f"Sending {human_size(total)} to {name} stopped: {exc}")
+            for c in carriers:
+                if c.alive:
+                    log(f"{c.name} has all {size}: {count} file(s) in {secs:.0f}s, {human_size(int(total / secs))} a second")
+                else:
+                    log(f"sending {size} to {c.name} stopped: {c.error or 'the connection was lost'}")
+                    self.notify(f"Sending {size} to {c.name} stopped: {c.error or 'the connection was lost'}")
         finally:
             self._xfer = None
-            try:
-                if tls:
-                    tls.close()
-            except Exception:
-                pass
+            for c in carriers:
+                try:
+                    c.sock.close()
+                except Exception:
+                    pass
             self.refresh_ui()
+
+    def _push(self, carriers, paths, total):
+        """Send the files to every carrier. Small files are read several at a time; one lock keeps each
+        message whole on the wire. Returns how many files went."""
+        import os
+        import queue
+        fid, wire = uuid.uuid4().hex, threading.Lock()
+
+        def send(header, payload=b""):
+            with wire:
+                for c in carriers:
+                    c.send(header, payload)
+            if payload:
+                self._xfer_progress(len(payload))
+
+        send({"type": "files_begin", "id": fid, "total": total,
+              "items": [os.path.basename(p.rstrip("/\\")) for p in paths]})
+        files = []
+        for p in paths:
+            p = p.rstrip("/\\")
+            base = os.path.dirname(p)
+            if os.path.isdir(p):
+                for root, _dirs, names in os.walk(p):
+                    rel_root = os.path.relpath(root, base).replace(os.sep, "/")
+                    send({"type": "dir", "id": fid, "path": rel_root})
+                    files += [(os.path.join(root, f), rel_root + "/" + f) for f in names]
+            elif os.path.isfile(p):
+                files.append((p, os.path.basename(p)))
+        todo = queue.Queue()
+        for item in files:
+            todo.put(item)
+
+        def worker():
+            while any(c.alive for c in carriers):
+                try:
+                    full, rel = todo.get_nowait()
+                except queue.Empty:
+                    return
+                offset = 0
+                try:
+                    with open(full, "rb") as fh:
+                        while any(c.alive for c in carriers):
+                            chunk = fh.read(C.CHUNK_BYTES)
+                            eof = len(chunk) < C.CHUNK_BYTES
+                            send({"type": "file_chunk", "id": fid, "path": rel, "offset": offset, "eof": eof}, chunk)
+                            offset += len(chunk)
+                            if eof:
+                                break
+                except OSError as exc:
+                    log(f"skipped {full}: {exc}")
+
+        workers = [threading.Thread(target=worker, daemon=True) for _ in range(min(READERS, max(len(files), 1)))]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+        send({"type": "files_end", "id": fid})
+        return len(files)
 
     # ---- the two machines agreeing it first, over the ordinary connection ----
     def on_transfer_frame(self, link, header):
