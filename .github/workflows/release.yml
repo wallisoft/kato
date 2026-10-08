@@ -65,10 +65,34 @@ jobs:
       - name: Build Juska-Setup.exe
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ needs.check.outputs.version }}" packaging\juska.iss
+      - name: Build Juska.msix (Microsoft Store)
+        # Only when the Store identity is set (repository variables, from Partner Center > Product identity).
+        # The Store package is the app alone: the lock-screen service cannot be shipped through the Store.
+        if: vars.MSIX_IDENTITY_NAME != ''
+        shell: pwsh
+        env:
+          ID: ${{ vars.MSIX_IDENTITY_NAME }}
+          PUB: ${{ vars.MSIX_PUBLISHER }}
+          PUBDISP: ${{ vars.MSIX_PUBLISHER_DISPLAY }}
+        run: |
+          $p = "${{ needs.check.outputs.version }}".Split('.'); while ($p.Count -lt 3) { $p += '0' }
+          $v = "$($p[0]).$($p[1]).$($p[2]).0"
+          New-Item -ItemType Directory msix\Assets -Force | Out-Null
+          Copy-Item -Recurse build\juska.dist\* msix\
+          Copy-Item packaging\THIRD-PARTY-NOTICES.txt msix\
+          python packaging/make_icon.py msix/Assets/Square150x150Logo.png 150
+          python packaging/make_icon.py msix/Assets/Square44x44Logo.png 44
+          python packaging/make_icon.py msix/Assets/StoreLogo.png 50
+          (Get-Content packaging\AppxManifest.xml -Raw).Replace('@IDENTITY_NAME@', $env:ID).Replace('@PUBLISHER@', $env:PUB).Replace('@PUBLISHER_DISPLAY@', $env:PUBDISP).Replace('@VERSION@', $v) | Set-Content msix\AppxManifest.xml -Encoding utf8
+          $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $makeappx.FullName pack /d msix /p Juska.msix /o
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: packaging/Output/Juska-Setup.exe
+          path: |
+            packaging/Output/Juska-Setup.exe
+            Juska.msix
+          if-no-files-found: warn
 
   linux:
     needs: check
@@ -119,6 +143,7 @@ jobs:
           for f in Juska-Setup.exe juska-linux-x86_64.tar.gz install.sh; do
             find . -name "$f" | grep -q . || { echo "::error::$f is missing"; exit 1; }
           done
+          find . -name Juska.msix | grep -q . && echo "Store package included" || echo "no Store package this time (set the MSIX_* variables)"
       - uses: softprops/action-gh-release@v2
         with:
           repository: wallisoft/juska-releases
@@ -132,3 +157,4 @@ jobs:
             **/Juska-Setup.exe
             **/juska-linux-x86_64.tar.gz
             **/install.sh
+            **/Juska.msix

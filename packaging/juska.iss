@@ -67,6 +67,11 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   rc: Integer;
 begin
+  // Juska was called AirShare before 0.10. A copy still running would keep Juska's ports and Juska would quietly
+  // step aside for it, so stop it (and its service) first. Harmless when there is nothing to stop.
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM airshare.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Exec(ExpandConstant('{sys}\sc.exe'), 'stop AirShareInput', '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM airshare-service.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop JuskaInput', '', SW_HIDE, ewWaitUntilTerminated, rc);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM juska-service.exe', '', SW_HIDE, ewWaitUntilTerminated, rc);
   Sleep(700);

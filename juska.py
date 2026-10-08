@@ -43,7 +43,7 @@ from clickboard_core import common as C
 import juska_licence as licence
 from juska_files import BigFiles
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -62,7 +62,7 @@ GREEN, BLUE, ORANGE = QColor(34, 197, 94), QColor(59, 130, 246), QColor(249, 115
 RELEASES_API = "https://api.github.com/repos/wallisoft/juska-releases/releases/latest"
 SETUP_URL = "https://github.com/wallisoft/juska-releases/releases/latest/download/Juska-Setup.exe"
 LINUX_INSTALL = "curl -fsSL https://github.com/wallisoft/juska-releases/releases/latest/download/install.sh | bash"
-STORE_URL = "ms-windows-store://pdp/?productid=9NK09P1L0KTJ"     # Juska KVM in the Microsoft Store
+STORE_URL = "ms-windows-store://pdp/?productid=9MSPVD4001W5"     # Juska KVM in the Microsoft Store
 WEBSITE = "https://juska.uk/#download"
 UPDATE_CHECK_EVERY = 6 * 3600
 
