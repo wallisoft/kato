@@ -1,13 +1,13 @@
-AirShare - third-party software notices
+Juska - third-party software notices
 =======================================
 
-AirShare is proprietary software (c) Wallisoft. It includes the following
+Juska is proprietary software (c) Wallisoft. It includes the following
 third-party components under their own licences.
 
 Qt for Python (PySide6) and the Qt libraries
   Licence: GNU Lesser General Public License v3 (LGPL-3.0)
   https://www.qt.io/licensing  |  https://doc.qt.io/qtforpython/licenses.html
-  The Qt libraries are included as separate, unmodified files in AirShare's
+  The Qt libraries are included as separate, unmodified files in Juska's
   installation folder and may be replaced with compatible versions. Source code
   for Qt is available from https://download.qt.io/ and on request from Wallisoft
   (hello@tiny-web.uk).

@@ -1,5 +1,5 @@
 """
-AirShare: large copies.
+Juska: large copies.
 
 The clipboard connection is also the keyboard-and-mouse connection, so a big copy sent down it makes the pointer
 wait behind megabytes of file. Anything over BIG_FILES_FROM therefore travels on a connection of its own, to the
@@ -22,8 +22,8 @@ from clickboard_core.identity import der_fingerprint
 from clickboard_core.protocol import recv_frame
 
 BIG_FILES_FROM = 32 * 1024 * 1024      # copies larger than this get a connection of their own
-XFER_FROM = "0.9.4"                    # the first AirShare that can receive one
-OLD_FILES_MAX = C.FILES_MAX_TOTAL      # what older AirShares accept (sized for the shared connection)
+XFER_FROM = "0.9.4"                    # the first Juska that can receive one
+OLD_FILES_MAX = C.FILES_MAX_TOTAL      # what older versions accept (sized for the shared connection)
 C.FILES_MAX_TOTAL = 200 * 1024 ** 3    # with its own connection, a copy can be far larger
 SPARE_DISK = 512 * 1024 ** 2           # never fill the receiving disk to the brim
 READERS = 8                            # files read at once (opening a file is the slow part on Windows)
@@ -55,7 +55,7 @@ class TransferLink:
 
 
 class BigFiles:
-    """Mixed into AirShare ahead of ClipboardSync and Mesh."""
+    """Mixed into Juska ahead of ClipboardSync and Mesh."""
 
     def _xfer_init(self):
         self._xfer, self._xfer_wait, self._xfer_expect = None, {}, {}
@@ -100,7 +100,7 @@ class BigFiles:
     def _send_big(self, links, paths, total):
         name_of = lambda l: self.peers.get(l.peer_id, {}).get("name", "another machine")
         size = human_size(total)
-        # 1. ask each machine (older AirShares get it the old way, or are told they need updating)
+        # 1. ask each machine (older versions get it the old way, or are told they need updating)
         asked = []
         for link in links:
             name = name_of(link)
@@ -109,8 +109,8 @@ class BigFiles:
                     threading.Thread(target=ClipboardSync._send_files, args=(self, link, paths, total),
                                      daemon=True).start()
                 else:
-                    self.notify(f"{name} needs AirShare {XFER_FROM} or newer to receive {size}.")
-                    log(f"not sending {size} to {name}: it needs AirShare {XFER_FROM} or newer")
+                    self.notify(f"{name} needs Juska {XFER_FROM} or newer to receive {size}.")
+                    log(f"not sending {size} to {name}: it needs Juska {XFER_FROM} or newer")
                 continue
             fid, answer = uuid.uuid4().hex, threading.Event()
             self._xfer_wait[fid] = [answer, None]

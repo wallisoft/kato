@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AirShare (working title) - one keyboard and mouse across your machines.
+Juska (working title) - one keyboard and mouse across your machines.
 
 Arrange your machines in a 4x4 grid; push the pointer off any edge that has a
 neighbour and it carries on onto that machine, keyboard and scrolling
@@ -8,8 +8,8 @@ included. Push it back and it comes home. The layout is shared by the whole
 group: change it on any machine and every machine follows. No master.
 
 X11, Windows and Wayland. A Wayland machine is driven through virtual input devices
-(airshare_uinput.py), and is the main computer through the desktop's own input-capture
-service (airshare_capture.py), which recent GNOME and KDE provide.
+(juska_uinput.py), and is the main computer through the desktop's own input-capture
+service (juska_capture.py), which recent GNOME and KDE provide.
 Discovery, trust and TLS come from clickboard_core (passphrase mode for now).
 
   Emergency: Scroll Lock, or Esc three times quickly, brings the pointer home.
@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import urllib.request
@@ -32,17 +33,17 @@ import time
 
 from pynput import keyboard, mouse
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QTextOption
+from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QTextOption
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
                                QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from clickboard_core import MIN_PASSPHRASE, ClipboardSync, Config, Mesh, log, set_app
 from clickboard_core import common as C
 
-import airshare_licence as licence
-from airshare_files import BigFiles
+import juska_licence as licence
+from juska_files import BigFiles
 
-VERSION = "0.9.12"
+VERSION = "0.10.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -58,11 +59,11 @@ STEP = {"left": (0, -1), "right": (0, 1), "up": (-1, 0), "down": (1, 0)}
 
 GREEN, BLUE, ORANGE = QColor(34, 197, 94), QColor(59, 130, 246), QColor(249, 115, 22)
 
-RELEASES_API = "https://api.github.com/repos/wallisoft/airshare-releases/releases/latest"
-SETUP_URL = "https://github.com/wallisoft/airshare-releases/releases/latest/download/AirShare-Setup.exe"
-LINUX_INSTALL = "curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash"
-STORE_URL = "ms-windows-store://pdp/?productid=9NK09P1L0KTJ"     # AirShare KVM in the Microsoft Store
-WEBSITE = "https://airshare.eur.bz/#download"
+RELEASES_API = "https://api.github.com/repos/wallisoft/juska-releases/releases/latest"
+SETUP_URL = "https://github.com/wallisoft/juska-releases/releases/latest/download/Juska-Setup.exe"
+LINUX_INSTALL = "curl -fsSL https://github.com/wallisoft/juska-releases/releases/latest/download/install.sh | bash"
+STORE_URL = "ms-windows-store://pdp/?productid=9NK09P1L0KTJ"     # Juska KVM in the Microsoft Store
+WEBSITE = "https://juska.uk/#download"
 UPDATE_CHECK_EVERY = 6 * 3600
 
 
@@ -105,13 +106,28 @@ def install_kind():
 TROUBLE = "\u26a0\ufe0f Check log"         # shown in the menu and the window; the menu item opens the log
 
 
+def adopt_old_settings():
+    """Juska was called AirShare until 0.10. The first time it runs under the new name, bring the old settings
+    across: this machine's name and identity, the passphrase, the layout and the licence, so nothing has to be set
+    up again. The old folder is left as it was. Returns True if settings were brought across."""
+    new = C.CONFIG_DIR
+    old = new.parent / ("AirShare" if platform.system() == "Windows" else "airshare")
+    if new.exists() or not old.is_dir():
+        return False
+    try:
+        shutil.copytree(old, new, ignore=shutil.ignore_patterns("*.log", "start.log"))
+        return True
+    except Exception:
+        return False
+
+
 def vtuple(v):
     return tuple(int(x) for x in re.findall(r"\d+", str(v))[:3]) or (0,)
 
 
 def latest_version():
     try:
-        req = urllib.request.Request(RELEASES_API, headers={"User-Agent": f"AirShare/{VERSION}",
+        req = urllib.request.Request(RELEASES_API, headers={"User-Agent": f"Juska/{VERSION}",
                                                            "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read()).get("tag_name", "").lstrip("v") or None
@@ -284,7 +300,7 @@ WAYLAND = LINUX and (os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
 
 
 class XGrabber:
-    """Linux/X11: AirShare's own explicit hold on the keyboard and pointer, on a dedicated
+    """Linux/X11: Juska's own explicit hold on the keyboard and pointer, on a dedicated
     X connection, with an explicit release. (Creating and destroying capturing listeners
     for every crossing could leave the keyboard held; this can't.)"""
 
@@ -337,10 +353,10 @@ _WIN_INPUT = None
 
 
 class SecureInput:
-    """Talks to the optional AirShare Input Service (SYSTEM) so we can inject onto Windows' secure
+    """Talks to the optional Juska Input Service (SYSTEM) so we can inject onto Windows' secure
     desktops (UAC, the login screen) too. Silently does nothing if the service isn't installed, so
     the feature is simply absent unless the user chose it in the installer."""
-    PIPE = r"\\.\pipe\AirShareInput"
+    PIPE = r"\\.\pipe\JuskaInput"
 
     def __init__(self):
         self.handle = None
@@ -417,10 +433,10 @@ def win_move_abs(x, y):
 
 
 class StartupSequences:
-    """X11 (GNOME on Xorg): when you click AirShare's tray menu, GNOME starts a "launching"
+    """X11 (GNOME on Xorg): when you click Juska's tray menu, GNOME starts a "launching"
     sequence (the spinning pointer) and waits to be told the app's window has arrived. Qt
     doesn't report back on X11, so the spinner lingers. We listen for those announcements
-    on the root window and complete any that are about AirShare once our window is up."""
+    on the root window and complete any that are about Juska once our window is up."""
 
     def __init__(self):
         self.pending = set()
@@ -460,7 +476,7 @@ class StartupSequences:
                 continue
             self._parts.pop(key, None)
             msg = buf.split(b"\0", 1)[0].decode(errors="ignore")
-            if msg.startswith("new:") and "airshare" in msg.lower():
+            if msg.startswith("new:") and "juska" in msg.lower():
                 m = re.search(r'ID=("(?:[^"\\]|\\.)*"|\S+)', msg)
                 if m:
                     with self._lock:
@@ -468,7 +484,7 @@ class StartupSequences:
                     log("startup sequence seen: " + m.group(1)[:60])
 
     def complete(self):
-        """Tell the window manager every AirShare launch sequence is finished."""
+        """Tell the window manager every Juska launch sequence is finished."""
         if not self.d:
             return
         with self._lock:
@@ -556,7 +572,7 @@ class Bridge(QObject):
     pointer = Signal(int, int, bool)    # stand-in pointer: x, y (screen pixels), show
 
 
-class AirShare(BigFiles, ClipboardSync, Mesh):
+class Juska(BigFiles, ClipboardSync, Mesh):
     """One MAIN computer captures its keyboard and mouse and drives the others.
 
     The main computer keeps a virtual pointer for whichever screen is active and
@@ -569,7 +585,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
     """
 
     def __init__(self, layout: dict, bridge: Bridge):
-        Mesh.__init__(self, Config.load(), service="airshare")
+        Mesh.__init__(self, Config.load(), service="airshare")      # the name on the network, from when Juska was AirShare: unchanged so every version still finds the others
         self.init_clipboard()
         self.cfg.paused = False
         self.layout = layout            # {"cells": {name: [r, c]}, "master": name, "version": t}
@@ -580,14 +596,14 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         self.cursor = CursorHider()
         self.paused = False
         self.sizes = {}                 # machine name -> (w, h), as reported by each machine
-        self.versions = {}              # machine name -> AirShare version it reports
+        self.versions = {}              # machine name -> Juska version it reports
         self.peer_paused = {}           # machine name -> it has said its sharing is paused
         self.hw = hardware_ids()        # this machine's network-card addresses
         self.machine_hw = {}            # machine name -> its addresses, as reported
         self._stand_in = False          # Windows: our own pointer is showing (Windows hid its own)
         self.latest = None              # newest release on GitHub, once checked
         self._check_now = False         # look for an update at the next opportunity (the settings window opened)
-        # AirShare Pro: the group's licence key and when it was last changed. The newest change wins on every
+        # Juska Pro: the group's licence key and when it was last changed. The newest change wins on every
         # machine, so entering, changing or removing the key on one computer does the same on all of them.
         self._licence_key, self._licence_at = self._load_licence()
         self._licence_cache = (None, None)
@@ -603,7 +619,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         self._sent_down = {}
         self._grabs, self._watchers = [], []
         self._esc_times = []
-        self._xfer_init()                    # large copies, see airshare_files.py
+        self._xfer_init()                    # large copies, see juska_files.py
         self._last_alive = 0.0
         self._busy = False              # a crossing is being set up
         self._input_on = False
@@ -630,10 +646,10 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             return bool(self.uinput)
         try:
             import importlib
-            airshare_uinput = importlib.import_module("airshare_uinput")     # Linux-only: kept out of the Windows build
-            if not airshare_uinput.available():
-                raise PermissionError("no access to /dev/uinput yet - run the AirShare installer again to grant it")
-            self.uinput = airshare_uinput.UinputInjector(log)
+            juska_uinput = importlib.import_module("juska_uinput")     # Linux-only: kept out of the Windows build
+            if not juska_uinput.available():
+                raise PermissionError("no access to /dev/uinput yet - run the Juska installer again to grant it")
+            self.uinput = juska_uinput.UinputInjector(log)
             self.uinput_error = ""
         except Exception as exc:
             if str(exc) != self.uinput_error:
@@ -743,7 +759,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
     def _save_layout(self):
         (C.CONFIG_DIR / "layout.json").write_text(json.dumps(self.layout, indent=2))
 
-    # ---- AirShare Pro: one licence for the whole group; the newest change wins everywhere ----
+    # ---- Juska Pro: one licence for the whole group; the newest change wins everywhere ----
     def _load_licence(self):
         try:
             saved = json.loads((C.CONFIG_DIR / "licence.json").read_text())
@@ -764,7 +780,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             log(f"couldn't save the licence key: {exc}")
 
     def licence_info(self):
-        """What the group's licence says, or None (AirShare Free)."""
+        """What the group's licence says, or None (Juska Free)."""
         if self._licence_cache[0] != self._licence_key:
             self._licence_cache = (self._licence_key, licence.read_licence(self._licence_key))
         return self._licence_cache[1]
@@ -784,13 +800,13 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         info = licence.read_licence(key)
         if not info:
             return None
-        log(f"AirShare Pro licence entered: up to {info['computers']} computers")
+        log(f"Juska Pro licence entered: up to {info['computers']} computers")
         self._licence_changed(info["key"], max(time.time(), self._licence_at + 1))
         return info
 
     def remove_licence(self):
-        """Back to AirShare Free, here and on the other computers."""
-        log("AirShare Pro licence removed: back to AirShare Free")
+        """Back to Juska Free, here and on the other computers."""
+        log("Juska Pro licence removed: back to Juska Free")
         self._licence_changed("", max(time.time(), self._licence_at + 1))
 
     def _licence_from_peer(self, header):
@@ -808,7 +824,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         newer = their_at > self._licence_at
         first = their_at == 0 and self._licence_at == 0 and not self._licence_key     # from a 0.9.8 machine
         if (newer or first) and (theirs == "" or licence.read_licence(theirs)):
-            log("AirShare Pro licence " + ("picked up from" if theirs else "removed on") + " another computer")
+            log("Juska Pro licence " + ("picked up from" if theirs else "removed on") + " another computer")
             self._licence_changed(theirs, their_at)
         elif self._licence_at > their_at:
             self.share_state()
@@ -902,10 +918,10 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         want = self.is_master() and self.kvm_on()
         if WAYLAND:
             # Wayland hides the keyboard and mouse from ordinary programs; the desktop's own capture service
-            # stands in for the X11 listeners (see airshare_capture.py).
+            # stands in for the X11 listeners (see juska_capture.py).
             if want and not self.capture:
                 import importlib
-                cap = importlib.import_module("airshare_capture").WaylandCapture(self, log, BACK_OFF, (ESCAPE_PRESSES, ESCAPE_WINDOW))
+                cap = importlib.import_module("juska_capture").WaylandCapture(self, log, BACK_OFF, (ESCAPE_PRESSES, ESCAPE_WINDOW))
                 self.capture = cap
                 if cap.start():
                     self._input_on = True
@@ -1212,12 +1228,12 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             if sender not in self.versions:
                 return                                        # it hasn't said which version it runs yet; it will resend
             if vtuple(self.versions[sender]) < vtuple(LAYOUT_TRUST_FROM):
-                # Older AirShares could stamp a stale layout as brand new when a machine changed name, and
+                # Older versions could stamp a stale layout as brand new when a machine changed name, and
                 # push it over everyone's. Their layouts are left alone until they are updated.
                 if sender not in self._layout_ignored:
                     self._layout_ignored.add(sender)
                     log(f"not taking the layout from {sender or 'an older machine'} until it is updated "
-                        f"(it runs AirShare {self.versions.get(sender, 'an old version')})")
+                        f"(it runs Juska {self.versions.get(sender, 'an old version')})")
                 return
             if float(theirs.get("version", 0)) > float(self.layout.get("version", 0)):
                 self.layout = {"cells": dict(theirs.get("cells", {})), "master": theirs.get("master"),
@@ -1445,7 +1461,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         if self.trouble():
             return TROUBLE
         if WAYLAND and not self.uinput and self.kvm_on():
-            return "Run the AirShare installer again so this computer can be controlled"
+            return "Run the Juska installer again so this computer can be controlled"
         if not self.master():
             return "Choose the main computer in Layout"
         if self.active:
@@ -1460,7 +1476,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             return "Update needed on: " + ", ".join(behind)
         if self.update_available() or self.newer_peers():
             newer = self.newer_peers()
-            return ("A newer AirShare is available" + (f" ({', '.join(newer)} already has it)" if newer else "")
+            return ("A newer Juska is available" + (f" ({', '.join(newer)} already has it)" if newer else "")
                     + ": open Layout and press Upgrade")
         if not self.kvm_on():
             return f"Clipboard sharing - {n} machine{'s' if n != 1 else ''} connected"
@@ -1471,7 +1487,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         return [p["name"] for pid, p in self.peers.items() if self.links.get(pid) and self.links[pid].alive]
 
     def out_of_date(self):
-        """Connected machines running a different AirShare version from the newest one in the group."""
+        """Connected machines running a different Juska version from the newest one in the group."""
         names = self.connected_names()
         everyone = {self.cfg.name: VERSION, **{n: self.versions.get(n, "old") for n in names}}
         newest = max(everyone.values(), key=vtuple)
@@ -1481,7 +1497,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         return bool(self.latest) and vtuple(self.latest) > vtuple(VERSION)
 
     def newer_peers(self):
-        """Machines on this network already running a newer AirShare than this one."""
+        """Machines on this network already running a newer Juska than this one."""
         return sorted(n for n, v in list(self.versions.items()) if vtuple(v) > vtuple(VERSION))
 
     def update_loop(self):
@@ -1506,7 +1522,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             webbrowser.open(STORE_URL)
         elif kind == "windows":
             try:
-                path = os.path.join(tempfile.gettempdir(), "AirShare-Setup.exe")
+                path = os.path.join(tempfile.gettempdir(), "Juska-Setup.exe")
                 urllib.request.urlretrieve(SETUP_URL, path)
                 os.startfile(path)                     # the installer closes this copy and replaces it
             except Exception as exc:
@@ -1728,7 +1744,7 @@ def button_style(widget):
 
 
 class Framed:
-    """Mixed into every AirShare window and pop-up: draws a thin, slightly rounded frame just inside the edge.
+    """Mixed into every Juska window and pop-up: draws a thin, slightly rounded frame just inside the edge.
     On a white desktop a white window otherwise has no visible boundary at all."""
     RADIUS = 8
 
@@ -1743,7 +1759,7 @@ class Framed:
 
 
 class Box(Framed, QMessageBox):
-    def __init__(self, parent=None, title="AirShare", text="", icon=QMessageBox.NoIcon):
+    def __init__(self, parent=None, title="Juska", text="", icon=QMessageBox.NoIcon):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setText(text)
@@ -1751,11 +1767,11 @@ class Box(Framed, QMessageBox):
         self.setStyleSheet(button_style(self))
 
 
-def tell(parent, text, title="AirShare", icon=QMessageBox.Information):
+def tell(parent, text, title="Juska", icon=QMessageBox.Information):
     Box(parent, title, text, icon).exec()
 
 
-def ask(parent, text, title="AirShare"):
+def ask(parent, text, title="Juska"):
     box = Box(parent, title, text, QMessageBox.Question)
     yes = box.addButton("Yes", QMessageBox.YesRole)
     box.setDefaultButton(box.addButton("No", QMessageBox.NoRole))
@@ -1767,7 +1783,7 @@ class KeyDialog(Framed, QDialog):
     """Where a licence key is pasted. A key is one long unbroken run of characters, so it wraps anywhere."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("AirShare Pro")
+        self.setWindowTitle("Juska Pro")
         self.setStyleSheet(button_style(self))
         v = QVBoxLayout(self)
         v.setContentsMargins(16, 14, 16, 14)
@@ -1798,17 +1814,17 @@ class KeyDialog(Framed, QDialog):
 
 def about_dialog(parent=None):
     box = Box(parent)
-    box.setWindowTitle("About AirShare")
+    box.setWindowTitle("About Juska")
     box.setTextFormat(Qt.RichText)
     box.setText(
-        f"<h3>AirShare {VERSION}</h3>"
+        f"<h3>Juska {VERSION}</h3>"
         "<p>One keyboard and mouse across all your computers, with a shared clipboard.<br>"
         "Windows and Linux, X11 and Wayland. Free for up to three computers.</p>"
         "<p>Created by Steve Wallis, Wallisoft.<br>"
         "Designed and built with Claude, by Anthropic.</p>"
-        '<p><a href="https://airshare.eur.bz">airshare.eur.bz</a> &nbsp;\u00b7&nbsp; '
+        '<p><a href="https://juska.uk">juska.uk</a> &nbsp;\u00b7&nbsp; '
         '<a href="https://tiny-web.uk">tiny-web.uk</a></p>'
-        "<p><small>The interface uses Qt under the LGPL; see the third-party notices installed with AirShare."
+        "<p><small>The interface uses Qt under the LGPL; see the third-party notices installed with Juska."
         "</small></p>")
     box.exec()
 
@@ -1820,11 +1836,11 @@ def enter_licence_dialog(app, parent=None):
         return False
     info = app.set_licence(dialog.key())
     if not info:
-        tell(parent, "That isn't a valid AirShare licence key.\n\n"
+        tell(parent, "That isn't a valid Juska licence key.\n\n"
              "Paste the whole key from your email. It starts with ASP1-.", icon=QMessageBox.Warning)
         return False
-    tell(parent, f"AirShare Pro is active for up to {info['computers']} computers.\n\n"
-         "Your other computers will pick it up by themselves.", "AirShare Pro")
+    tell(parent, f"Juska Pro is active for up to {info['computers']} computers.\n\n"
+         "Your other computers will pick it up by themselves.", "Juska Pro")
     return True
 
 
@@ -1837,10 +1853,10 @@ def licence_dialog(app, parent=None):
     issued = info.get("issued", "")
     if len(issued) == 8 and issued.isdigit():
         issued = f"{issued[6:8]}/{issued[4:6]}/{issued[0:4]}"
-    box = Box(parent, "AirShare Pro")
+    box = Box(parent, "Juska Pro")
     box.setTextFormat(Qt.RichText)
     box.setTextInteractionFlags(Qt.TextSelectableByMouse)
-    box.setText(f"<b>AirShare Pro</b>: up to {info['computers']} computers<br>"
+    box.setText(f"<b>Juska Pro</b>: up to {info['computers']} computers<br>"
                 f"Licence {info.get('id', '')}" + (f", issued {issued}" if issued else "")
                 + f"<p style='font-family:monospace'>{'<br>'.join(info['key'][i:i + 44] for i in range(0, len(info['key']), 44))}</p>")
     copy = box.addButton("Copy key", QMessageBox.ActionRole)
@@ -1854,7 +1870,7 @@ def licence_dialog(app, parent=None):
     elif clicked is change:
         enter_licence_dialog(app, parent)
     elif clicked is remove:
-        if ask(parent, "Remove the licence key from all your computers and go back to AirShare Free "
+        if ask(parent, "Remove the licence key from all your computers and go back to Juska Free "
                f"(up to {licence.FREE_COMPUTERS} computers)?\n\nKeep a copy of the key: you can enter it again at any time."):
             app.remove_licence()
 
@@ -1864,11 +1880,11 @@ def view_log():
 
 
 class SettingsWindow(Framed, QWidget):
-    def __init__(self, app: AirShare, extras=None):
+    def __init__(self, app: Juska, extras=None):
         super().__init__()
         self.app = app
         self.extras = extras              # the tray's extra menu items, offered here on desktops with no tray
-        self.setWindowTitle("AirShare - layout and settings")
+        self.setWindowTitle("Juska - layout and settings")
         body = QWidget()
         v = QVBoxLayout(body)
         outer = QVBoxLayout(self)
@@ -2009,8 +2025,8 @@ class SettingsWindow(Framed, QWidget):
         self.upgrade_btn.setVisible(a.update_available())
         self.upgrade_btn.setText("Open the Store" if install_kind() == "store" else f"Upgrade to {a.latest}")
         pro = a.licence_info()
-        self.licence_label.setText(f"<b>AirShare Pro</b>: up to {pro['computers']} computers" if pro
-                                   else f"AirShare Free: up to {licence.FREE_COMPUTERS} computers")
+        self.licence_label.setText(f"<b>Juska Pro</b>: up to {pro['computers']} computers" if pro
+                                   else f"Juska Free: up to {licence.FREE_COMPUTERS} computers")
 
     def tick(self):
         """Keep status fresh; add newly seen machines to the pool without disturbing edits."""
@@ -2032,7 +2048,7 @@ class SettingsWindow(Framed, QWidget):
             tell(self, f"The passphrase needs at least {MIN_PASSPHRASE} characters.", icon=QMessageBox.Warning)
             return
         if self.app.cfg.name not in self.grid.cells:
-            tell(self, "Place this machine in the grid too, so AirShare knows where it sits.", icon=QMessageBox.Warning)
+            tell(self, "Place this machine in the grid too, so Juska knows where it sits.", icon=QMessageBox.Warning)
             return
         master = self.master_box.currentText()
         if master not in self.grid.cells:
@@ -2044,8 +2060,8 @@ class SettingsWindow(Framed, QWidget):
             box = Box(self, icon=QMessageBox.Information)
             box.setText(f"You have placed {placed} computers.\n\n" + (
                 f"Your licence covers up to {allowed}." if pro else
-                f"AirShare Free shares a keyboard and mouse between up to {licence.FREE_COMPUTERS} computers. "
-                "AirShare Pro covers up to 15, for a one-off payment."))
+                f"Juska Free shares a keyboard and mouse between up to {licence.FREE_COMPUTERS} computers. "
+                "Juska Pro covers up to 15, for a one-off payment."))
             buy = None if pro else box.addButton("Get Pro", QMessageBox.AcceptRole)
             key = box.addButton("Enter licence key", QMessageBox.ActionRole)
             box.addButton("Not now", QMessageBox.RejectRole)
@@ -2068,7 +2084,7 @@ class SettingsWindow(Framed, QWidget):
 
 class StandInPointer(QWidget):
     """Windows hides its pointer on a PC with no mouse attached. While another machine drives
-    this one, AirShare draws its own arrow there instead: always on top, click-through,
+    this one, Juska draws its own arrow there instead: always on top, click-through,
     never takes focus. No driver, no dongle."""
     SIZE = 26
 
@@ -2106,7 +2122,7 @@ class StandInPointer(QWidget):
 
 
 class Tray:
-    def __init__(self, app: AirShare, qapp: QApplication):
+    def __init__(self, app: Juska, qapp: QApplication):
         self.app, self.qapp = app, qapp
         self.settings = None
         self.icon = QSystemTrayIcon(dot_icon(ORANGE))
@@ -2114,7 +2130,7 @@ class Tray:
         self.icon.setContextMenu(self.menu)
         self.icon.activated.connect(self.on_activated)
         app.bridge.refresh.connect(self.refresh)
-        app.bridge.notify.connect(lambda m: self.icon.showMessage("AirShare", m, QSystemTrayIcon.Information, 6000))
+        app.bridge.notify.connect(lambda m: self.icon.showMessage("Juska", m, QSystemTrayIcon.Information, 6000))
         app.bridge.open_settings.connect(self.open_settings)
         self.startup = StartupSequences()
         self.stand_in = None
@@ -2131,12 +2147,16 @@ class Tray:
         if self._icon_shown:
             self.icon.show()
         else:
-            log("this desktop has no tray: opening the settings window instead (open AirShare from the app menu to see it again)")
+            log("this desktop has no tray: opening the settings window instead (open Juska from the app menu to see it again)")
             QTimer.singleShot(1200, self.open_settings)
 
     def on_activated(self, reason):
+        # A plain click shows the menu, the same as a right-click. Linux desktops do this themselves; on Windows a
+        # left click reaches us and used to pause sharing, which was easy to do by accident. Pause is in the menu.
         if reason == QSystemTrayIcon.Trigger:
-            self.app.toggle_pause()
+            self.refresh()
+            self.menu.popup(QCursor.pos())
+            self.menu.activateWindow()                 # so clicking elsewhere closes it
 
     def refresh(self):
         """Runs every 2 s. Only touches the tray when something has actually changed, and never
@@ -2148,7 +2168,7 @@ class Tray:
         if self.stand_in and a.driven_by is None and self.stand_in.isVisible():
             self.stand_in.hide()
             a._stand_in = False
-        colour, tip = a.colour(), f"AirShare - {a.status_line()}"
+        colour, tip = a.colour(), f"Juska - {a.status_line()}"
         if colour != getattr(self, "_colour", None):
             self._colour = colour
             self.icon.setIcon(dot_icon(colour))
@@ -2206,7 +2226,7 @@ class Tray:
         else:
             spec = [("item", "Get Pro...", True, lambda: webbrowser.open(licence.BUY_URL)),
                     ("item", "Enter key...", True, lambda: enter_licence_dialog(a, parent()))]
-        return spec + [("item", "View log", True, view_log), ("item", "About AirShare", True, lambda: about_dialog(parent()))]
+        return spec + [("item", "View log", True, view_log), ("item", "About Juska", True, lambda: about_dialog(parent()))]
 
     def open_settings(self):
         if not self.settings:
@@ -2247,7 +2267,7 @@ def main():
         log(f"internal error in a background thread ({getattr(args.thread, 'name', '?')}): "
             f"{getattr(args.exc_type, '__name__', args.exc_type)}: {args.exc_value}")
     threading.excepthook = thread_crashed
-    ap = argparse.ArgumentParser(description="AirShare: one keyboard and mouse across your machines")
+    ap = argparse.ArgumentParser(description="Juska: one keyboard and mouse across your machines")
     ap.add_argument("--passphrase", help="shared passphrase (same on every machine, 8+ characters)")
     ap.add_argument("--name", help="this machine's name (default: its hostname)")
     ap.add_argument("--quit", action="store_true", help="quit the running copy")
@@ -2256,8 +2276,9 @@ def main():
     if send_to_running("quit" if a.quit else "settings") or a.quit:
         return
 
-    set_app("AirShare", VERSION)
+    set_app("Juska", VERSION)
     C.DEFAULT_PORT, C.BEACON_PORT = PORT, BEACON_PORT
+    adopted = adopt_old_settings()
     C.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     try:                                          # a power cut can leave empty bytes in the log, which makes tools
         raw = C.LOG_FILE.read_bytes()             # treat it as binary and refuse to show it: take them out
@@ -2275,7 +2296,7 @@ def main():
     qapp = QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)
     bridge = Bridge()
-    app = AirShare(layout, bridge)
+    app = Juska(layout, bridge)
     if a.name:
         app.cfg.name = a.name
     if a.passphrase:
@@ -2299,7 +2320,9 @@ def main():
     tick = QTimer()
     tick.timeout.connect(lambda: None)
     tick.start(250)
-    log(f"AirShare {VERSION} as '{app.cfg.name}', screen {app.bounds[2]}x{app.bounds[3]}")
+    log(f"Juska {VERSION} as '{app.cfg.name}', screen {app.bounds[2]}x{app.bounds[3]}")
+    if adopted:
+        log("settings, layout and licence carried over from AirShare, as Juska used to be called")
     if not app._local_key or not app.cells() or not app.master():
         QTimer.singleShot(1500, tray.open_settings)
     sys.exit(qapp.exec())

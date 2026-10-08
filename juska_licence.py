@@ -1,8 +1,8 @@
 """
-AirShare: Pro licences.
+Juska: Pro licences.
 
 A licence key is a short signed statement, "pro | how many computers | id | date", issued by tiny-web.uk when
-someone buys AirShare Pro. It is checked here with the public half of the signing key, so it needs no account and
+someone buys Juska Pro. It is checked here with the public half of the signing key, so it needs no account and
 no internet, and nobody can make one without the private half, which never leaves the server.
 
     ASP1-<payload, base64url>.<signature, base64url>
@@ -12,7 +12,7 @@ import re
 
 PUBLIC_KEY = "a10f27df2f62cbb78f726b36c3b858e0ca7ae3d2304d03a9168f77290c10f53c"
 FREE_COMPUTERS = 3
-BUY_URL = "https://airshare.eur.bz/#pricing"
+BUY_URL = "https://juska.uk/#pricing"
 
 
 def _unb64(text):

@@ -1,7 +1,7 @@
 """
-AirShare on Wayland: being the main computer.
+Juska on Wayland: being the main computer.
 
-The watching itself is done by airshare_capture_helper.py, a separate small program run with the system
+The watching itself is done by juska_capture_helper.py, a separate small program run with the system
 Python (see its header for why and how). This module starts it, keeps it fed with which screen edges have
 a neighbour, and turns what it reports into the same actions the X11 code takes: cross to a neighbour,
 steer its pointer, forward keys and clicks, come home.
@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-import airshare_uinput as U
+import juska_uinput as U
 
 SIDE = {"left": "left", "right": "right", "top": "up", "bottom": "down"}        # the desktop's names -> ours
 EDGE = {v: k for k, v in SIDE.items()}
@@ -54,7 +54,7 @@ class WaylandCapture:
         self.repeat = None                  # (physical key, wire key, when pressed): the key being held
         self.rest_until = 0.0               # after a refused crossing, leave the edges alone until this time
         self.was_ready = False              # the helper got as far as talking to the desktop at least once
-        self.stopped_at = 0.0               # when the helper stopped (AirShare starts it again, see _revive_capture)
+        self.stopped_at = 0.0               # when the helper stopped (Juska starts it again, see _revive_capture)
         self.idle_reason = ""
         self.running = False
         self.lock = threading.Lock()
@@ -68,10 +68,10 @@ class WaylandCapture:
 
     # ---- lifecycle ----
     def start(self):
-        helper = os.environ.get("AIRSHARE_CAPTURE_HELPER") or str(Path(__file__).with_name("airshare_capture_helper.py"))
-        python = os.environ.get("AIRSHARE_CAPTURE_PYTHON") or HELPER_PYTHON
+        helper = os.environ.get("JUSKA_CAPTURE_HELPER") or str(Path(__file__).with_name("juska_capture_helper.py"))
+        python = os.environ.get("JUSKA_CAPTURE_PYTHON") or HELPER_PYTHON
         if not os.path.exists(helper):
-            self.error, self.stopped_at = "AirShare's Wayland helper is missing from this installation", time.time()
+            self.error, self.stopped_at = "Juska's Wayland helper is missing from this installation", time.time()
             return False
         if not os.path.exists(python):
             self.error, self.stopped_at = f"the system Python ({python}) was not found", time.time()
@@ -79,7 +79,7 @@ class WaylandCapture:
         env = {k: v for k, v in os.environ.items() if k not in ("LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME", "QT_PLUGIN_PATH")}
         try:
             # In a session of its own: Ctrl+C in a terminal goes to everything started from it, and would
-            # otherwise stop the helper while leaving AirShare running without one.
+            # otherwise stop the helper while leaving Juska running without one.
             self.proc = subprocess.Popen([python, "-I", helper], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, text=True, bufsize=1, env=env, start_new_session=True)
         except Exception as exc:
@@ -231,7 +231,7 @@ class WaylandCapture:
                 a._send(link, {"type": "kvm_btn", "button": name, "down": bool(ev.get("down"))})
         elif e == "s":
             link = a.link_to(a.active)
-            if link:                                            # the desktop counts down as positive; AirShare counts up
+            if link:                                            # the desktop counts down as positive; Juska counts up
                 a._send(link, {"type": "kvm_scroll", "dx": ev.get("dx", 0), "dy": -ev.get("dy", 0)})
         elif e == "activated":
             self._activated(SIDE.get(ev.get("side"), ""), float(ev.get("x", 0)), float(ev.get("y", 0)), ev.get("zone"))

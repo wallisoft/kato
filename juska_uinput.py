@@ -1,8 +1,8 @@
 """
-AirShare on Wayland: being driven, through the kernel's uinput.
+Juska on Wayland: being driven, through the kernel's uinput.
 
-Wayland stops one program placing the pointer or pressing keys in another, which is how AirShare is
-driven on X11. So here AirShare creates two virtual devices one level below the desktop - an absolute
+Wayland stops one program placing the pointer or pressing keys in another, which is how Juska is
+driven on X11. So here Juska creates two virtual devices one level below the desktop - an absolute
 pointer (the kind a virtual machine's "tablet" mouse is) and a keyboard. The desktop treats them as
 real hardware, on any Wayland compositor, with no permission pop-ups.
 
@@ -236,8 +236,8 @@ class UinputInjector:
     def __init__(self, log=print, device=_Device):
         self.log = log
         self.lock = threading.Lock()
-        self.pointer = device("AirShare pointer", tuple(BTN.values()), rel=(REL_WHEEL, REL_HWHEEL), absolute=(ABS_X, ABS_Y))
-        self.keyboard = device("AirShare keyboard", range(1, 249))
+        self.pointer = device("Juska pointer", tuple(BTN.values()), rel=(REL_WHEEL, REL_HWHEEL), absolute=(ABS_X, ABS_Y))
+        self.keyboard = device("Juska keyboard", range(1, 249))
         self.layout = detect_layout()
         try:
             self.chars = build_keymap(*self.layout)

@@ -1,9 +1,9 @@
 name: Release
 
-# Push a tag like v0.3.0 and this compiles AirShare to native code with Nuitka,
+# Push a tag like v0.3.0 and this compiles Juska to native code with Nuitka,
 # builds the Windows installer and the Linux package, and publishes them to the
-# PUBLIC repo wallisoft/airshare-releases. The source stays in this private repo.
-# Needs the RELEASES_TOKEN secret (fine-grained token: airshare-releases, Contents read/write).
+# PUBLIC repo wallisoft/juska-releases. The source stays in this private repo.
+# Needs the RELEASES_TOKEN secret (fine-grained token: juska-releases, Contents read/write).
 
 on:
   push:
@@ -20,10 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: v
-        name: Tag must match VERSION in airshare.py
+        name: Tag must match VERSION in juska.py
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          CODE=$(grep -m1 '^VERSION' airshare.py | cut -d'"' -f2)
+          CODE=$(grep -m1 '^VERSION' juska.py | cut -d'"' -f2)
           echo "tag=$TAG code=$CODE"
           [ "$TAG" = "$CODE" ] || { echo "::error::Tag v$TAG doesn't match VERSION $CODE"; exit 1; }
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
@@ -42,15 +42,15 @@ jobs:
           python -m pip install -r requirements.txt nuitka ordered-set zstandard
           choco install innosetup -y --no-progress
       - name: Make the icon (a blue dot)
-        run: python packaging/make_icon.py packaging/airshare.ico
+        run: python packaging/make_icon.py packaging/juska.ico
       - name: Compile with Nuitka
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads --enable-plugin=pyside6 `
-            --windows-console-mode=disable --windows-icon-from-ico=packaging/airshare.ico `
+            --windows-console-mode=disable --windows-icon-from-ico=packaging/juska.ico `
             --include-module=pynput.keyboard._win32 --include-module=pynput.mouse._win32 `
-            --company-name=Wallisoft --product-name=AirShare `
+            --company-name=Wallisoft --product-name=Juska `
             --file-version=${{ needs.check.outputs.version }} --product-version=${{ needs.check.outputs.version }} `
-            --output-dir=build airshare.py
+            --output-dir=build juska.py
       - name: Compile the secure-desktop service with Nuitka
         run: |
           python -m pip install pywin32
@@ -58,17 +58,17 @@ jobs:
             --include-module=win32timezone --include-module=servicemanager `
             --include-module=ntsecuritycon --include-module=win32security `
             --include-module=win32service --include-module=win32file --include-module=win32pipe `
-            --output-filename=airshare-service.exe `
-            --company-name=Wallisoft --product-name="AirShare Input Service" `
+            --output-filename=juska-service.exe `
+            --company-name=Wallisoft --product-name="Juska Input Service" `
             --file-version=${{ needs.check.outputs.version }} --product-version=${{ needs.check.outputs.version }} `
-            --output-dir=build packaging/airshare_service.py
-      - name: Build AirShare-Setup.exe
+            --output-dir=build packaging/juska_service.py
+      - name: Build Juska-Setup.exe
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ needs.check.outputs.version }}" packaging\airshare.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ needs.check.outputs.version }}" packaging\juska.iss
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: packaging/Output/AirShare-Setup.exe
+          path: packaging/Output/Juska-Setup.exe
 
   linux:
     needs: check
@@ -88,23 +88,23 @@ jobs:
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads --enable-plugin=pyside6 \
             --include-module=pynput.keyboard._xorg --include-module=pynput.mouse._xorg \
-            --include-module=airshare_uinput --include-module=airshare_capture \
-            --include-package=Xlib --output-dir=build airshare.py
+            --include-module=juska_uinput --include-module=juska_capture \
+            --include-package=Xlib --output-dir=build juska.py
       - name: Package
         run: |
-          mv build/airshare.dist airshare
-          python packaging/make_icon.py airshare/airshare.png
-          cp packaging/THIRD-PARTY-NOTICES.txt airshare/
+          mv build/juska.dist juska
+          python packaging/make_icon.py juska/juska.png
+          cp packaging/THIRD-PARTY-NOTICES.txt juska/
           # The Wayland capture helper is run by the system Python, so it ships as a plain script next to the program.
-          cp airshare_capture_helper.py airshare/
-          test -f airshare/airshare_capture_helper.py && python3 -m py_compile airshare_capture_helper.py
-          tar czf airshare-linux-x86_64.tar.gz airshare
+          cp juska_capture_helper.py juska/
+          test -f juska/juska_capture_helper.py && python3 -m py_compile juska_capture_helper.py
+          tar czf juska-linux-x86_64.tar.gz juska
           cp packaging/install.sh install.sh
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: |
-            airshare-linux-x86_64.tar.gz
+            juska-linux-x86_64.tar.gz
             install.sh
 
   publish:
@@ -116,19 +116,19 @@ jobs:
           merge-multiple: true
       - name: Make sure everything made it
         run: |
-          for f in AirShare-Setup.exe airshare-linux-x86_64.tar.gz install.sh; do
+          for f in Juska-Setup.exe juska-linux-x86_64.tar.gz install.sh; do
             find . -name "$f" | grep -q . || { echo "::error::$f is missing"; exit 1; }
           done
       - uses: softprops/action-gh-release@v2
         with:
-          repository: wallisoft/airshare-releases
+          repository: wallisoft/juska-releases
           token: ${{ secrets.RELEASES_TOKEN }}
           tag_name: ${{ github.ref_name }}
-          name: AirShare ${{ needs.check.outputs.version }}
+          name: Juska ${{ needs.check.outputs.version }}
           body: |
-            **Windows 10 and 11:** download `AirShare-Setup.exe` and run it.
-            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; X11 and Wayland):** `curl -fsSL https://github.com/wallisoft/airshare-releases/releases/latest/download/install.sh | bash`
+            **Windows 10 and 11:** download `Juska-Setup.exe` and run it.
+            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; X11 and Wayland):** `curl -fsSL https://github.com/wallisoft/juska-releases/releases/latest/download/install.sh | bash`
           files: |
-            **/AirShare-Setup.exe
-            **/airshare-linux-x86_64.tar.gz
+            **/Juska-Setup.exe
+            **/juska-linux-x86_64.tar.gz
             **/install.sh
