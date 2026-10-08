@@ -88,6 +88,8 @@ class WaylandCapture:
             return False
         self.running = True
         self.last_err = ""
+        self.last_note = ""
+        self.every = None
         threading.Thread(target=self._read_errors, args=(self.proc,), daemon=True).start()
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._tend, daemon=True).start()
@@ -135,6 +137,14 @@ class WaylandCapture:
         return [EDGE[s] for s in ("left", "right", "up", "down")
                 if (lambda n: n and a.link_to(n) and n in a.sizes)(a.neighbour(s))]
 
+    def layout_sides(self):
+        """Every edge with a machine placed beside it in Layout, connected or not. The desktop is given barriers
+        for all of these once, so a machine coming or going later needs no change to the capture itself."""
+        a = self.app
+        if not (a.is_master() and a.kvm_on()):
+            return []
+        return [EDGE[s] for s in ("left", "right", "up", "down") if a.neighbour(s)]
+
     def why_idle(self):
         """In plain words, why no screen edge is being watched right now."""
         a = self.app
@@ -159,19 +169,20 @@ class WaylandCapture:
             if self.app.active:
                 self._say(c="alive")
             if self.ready:
-                want = self.wanted_sides()
-                if want != self.sides:
-                    self.sides = want
+                want, every = self.wanted_sides(), self.layout_sides()
+                if want != self.sides or every != self.every:
+                    self.sides, self.every = want, every
                     self.idle_reason = "" if want else self.why_idle()
-                    self._say(c="barriers", sides=want)
+                    self._say(c="barriers", sides=want, every=every)
             if self.proc and self.proc.poll() is not None and self.running:
                 self.running = False
                 self.stopped_at = time.time()
                 if not self.error:
                     time.sleep(0.3)
                     why = getattr(self, "last_err", "")
-                    self.error = "the Wayland helper stopped" + (f" ({why})" if why else "")
-                self.log(f"Wayland: {self.error}")
+                    self.error = self.last_note or ("the Wayland helper stopped" + (f" ({why})" if why else ""))
+                    if not self.last_note:
+                        self.log(f"Wayland: {self.error}")
                 if self.app.active:
                     threading.Thread(target=self.app._home_safely, daemon=True).start()
                 self.app.refresh_ui()
@@ -237,7 +248,7 @@ class WaylandCapture:
                 x0, y0 = min(z[2] for z in zones), min(z[3] for z in zones)
                 x1, y1 = max(z[2] + z[0] for z in zones), max(z[3] + z[1] for z in zones)
                 self.bounds = (x0, y0, max(x1 - x0, 1), max(y1 - y0, 1))
-            self.ready, self.was_ready, self.error, self.sides = True, True, "", None
+            self.ready, self.was_ready, self.error, self.sides, self.every, self.last_note = True, True, "", None, None, ""
             self.log(f"Wayland: main computer ready, desktop {self.bounds[2]}x{self.bounds[3]}, "
                      f"keyboard layout {'+'.join(x for x in self.layout if x)}")
             a.refresh_ui()
@@ -246,9 +257,10 @@ class WaylandCapture:
             self.log(f"Wayland: watching the {', '.join(self.armed)} screen edge(s)" if self.armed
                      else f"Wayland: not watching any screen edge yet ({self.idle_reason or self.why_idle()})")
         elif e == "error":
-            self.error = str(ev.get("msg", "unknown problem"))
-            self.log(f"Wayland: {self.error}")
-            a.refresh_ui()
+            # Something to record, not a state: most of these are a single crossing handed back, and sharing
+            # carries on. Only the helper actually stopping (see _tend) counts as "can't share" in the menu.
+            self.last_note = str(ev.get("msg", "unknown problem"))
+            self.log(f"Wayland: {self.last_note}")
 
     def forget_keys(self):
         """Nothing is held any more as far as we are concerned (we came home, or are setting off afresh).
@@ -262,7 +274,7 @@ class WaylandCapture:
         capture and release in a tight loop."""
         self.rest_until = time.time() + 3
         self.sides = []
-        self._say(c="barriers", sides=[])
+        self._say(c="barriers", sides=[], every=self.every or [])
         self.log(f"Wayland: {why}; the screen edge rests for 3 seconds")
 
     def _activated(self, side, x, y, zone=None):

@@ -16,7 +16,7 @@ This small program does that conversation and nothing else. AirShare starts it w
               {"e":"m","dx":..,"dy":..}  {"e":"k","code":30,"down":true}
               {"e":"b","code":272,"down":true}  {"e":"s","dx":0,"dy":-1}
               {"e":"deactivated"}  {"e":"disabled"}  {"e":"error","msg":"..."}
-  it reads    {"c":"barriers","sides":["left","right"]}   {"c":"release","x":..,"y":..}
+  it reads    {"c":"barriers","sides":["left"],"every":["left","right"]}   {"c":"release","x":..,"y":..}
               {"c":"alive"}   {"c":"quit"}
 
 SAFETY. Holding someone's keyboard and mouse is serious, so this program does not rely on AirShare to let go:
@@ -67,7 +67,7 @@ except Exception as exc:
     fail(f"no desktop session bus: {exc}", 4)
 sender = conn.get_unique_name()[1:].replace(".", "_")
 loop = GLib.MainLoop()
-S = {"session": None, "zones": [], "zone_set": 0, "sides": [], "barriers": {}, "enabled": False,
+S = {"session": None, "zones": [], "zone_set": 0, "sides": [], "every": [], "live": [], "barriers": {}, "enabled": False,
      "activation": None, "alive": 0.0, "inclusive": True, "last_discrete": 0.0, "scroll": [0.0, 0.0],
      "released_at": 0.0, "esc": [], "captures": [], "resting": False, "orphan": 0.0}
 
@@ -131,20 +131,39 @@ def barrier_list(sides, inclusive):
     return items, names
 
 
-def set_barriers(sides):
-    """Put barriers on these edges (and only these), then switch capturing on. An empty list switches it off."""
-    S["sides"] = [s for s in SIDES if s in sides]
+def set_barriers(sides, every=None, force=False):
+    """Say which screen edges should carry the pointer across right now.
+
+    The desktop is told once per helper which edges have barriers: "every" edge with a machine beside it in the
+    layout, connected or not. After that an edge is switched on or off here, by handing a capture straight back
+    if it starts at an edge nobody is connected beyond. Capturing is never switched off and on again while this
+    helper lives, because GNOME then still takes the keyboard and mouse at the edge but delivers none of it.
+    Only a layout that needs a new edge, or a change of screens, sets the barriers again.
+    """
+    want = [s for s in SIDES if s in sides]
+    every = [s for s in SIDES if s in (every or [])] or want
+    S["sides"], S["every"] = want, every
+    if S["enabled"] and not force:
+        missing = [s for s in want if s not in S["live"]]
+        if missing:
+            start_afresh("the layout now uses another screen edge (" + ", ".join(missing) + ")")
+            return
+        if not want and S["activation"] is not None:
+            release()
+            out(e="deactivated")
+        out(e="armed", sides=want)
+        return
     try:
         if S["enabled"]:
             call("Disable", GLib.Variant("(oa{sv})", (S["session"], {})))
             S["enabled"] = False
-        if not S["sides"]:
-            S["barriers"] = {}
+        if not every:
+            S["barriers"], S["live"] = {}, []
             out(e="armed", sides=[])
             return
         good = {}
         for inclusive in (S["inclusive"], not S["inclusive"]):      # desktops differ on where an edge ends
-            items, names = barrier_list(S["sides"], inclusive)
+            items, names = barrier_list(every, inclusive)
             res = request("SetPointerBarriers", lambda t: GLib.Variant("(oa{sv}aa{sv}u)", (S["session"], tok(t), items, S["zone_set"])))
             failed = set(res.get("failed_barriers", []))
             good = {i: s for i, s in names.items() if i not in failed}
@@ -152,12 +171,31 @@ def set_barriers(sides):
                 S["inclusive"] = inclusive
                 break
         S["barriers"] = good
+        S["live"] = sorted({side for side, _ in good.values()})
         if good:
             call("Enable", GLib.Variant("(oa{sv})", (S["session"], {})))
             S["enabled"] = True
-        out(e="armed", sides=sorted({side for side, _ in good.values()}))
+        out(e="armed", sides=[s for s in want if s in S["live"]])
     except Exception as exc:
         out(e="error", msg=f"couldn't set the screen-edge barriers: {exc}")
+
+
+def orphan_input(now):
+    """Input has arrived with no capture that we know of. Returns what to do: None, "handback" or "afresh".
+
+    Usually it is just the start of a new capture (the input and the desktop's "you have it now" message travel
+    separately, and the input can arrive first) or the tail of one that just ended. Only input that keeps coming
+    without a break for a second and a half means the desktop has failed to let go. A stray event, a pause, then
+    another stray event later is two separate moments and must not be added together.
+    """
+    if now - S.get("orphan_last", 0.0) > 0.4:                   # a gap: this is a new burst, start timing again
+        S["orphan"] = now
+    S["orphan_last"] = now
+    if now - S["orphan"] <= 1.5:
+        return None
+    S["orphan"] = S["orphan_last"] = 0.0
+    S["orphan_hits"] = [t0 for t0 in S.get("orphan_hits", []) if now - t0 < 20] + [now]
+    return "afresh" if len(S["orphan_hits"]) >= 2 else "handback"
 
 
 def switch_off(why, rest):
@@ -310,19 +348,15 @@ def on_ei(*_):
         # the desktop's "you have it now" message travel separately, and the input can arrive first. So wait.
         # Only if input keeps coming for a full second with still no such message has the desktop failed to let
         # go, and then capturing is switched off, which always frees the keyboard and mouse.
-        if got_input and not S["resting"]:
-            now = time.monotonic()
-            if not S["orphan"]:
-                S["orphan"] = now
-            elif now - S["orphan"] > 1.5:
-                S["orphan"] = 0.0
-                S["orphan_hits"] = [t0 for t0 in S.get("orphan_hits", []) if now - t0 < 20] + [now]
-                if len(S["orphan_hits"]) >= 2:
-                    start_afresh("the desktop keeps sending input with no capture in progress")
-                    return False
+        if got_input and not S["resting"] and time.monotonic() > S.get("quiet_until", 0.0):
+            verdict = orphan_input(time.monotonic())
+            if verdict == "afresh":
+                start_afresh("the desktop keeps sending input with no capture in progress")
+                return False
+            if verdict == "handback":
                 switch_off("the desktop kept sending input with no capture in progress: handed it back", 2)
         return True
-    S["orphan"] = 0.0
+    S["orphan"] = S["orphan_last"] = 0.0
     if mx or my:
         out(e="m", dx=round(mx, 2), dy=round(my, 2))
     return True
@@ -331,7 +365,10 @@ def on_ei(*_):
 def on_activated(_c, _s, _p, _i, _sig, params):
     _session, opts = params.unpack()
     now = time.monotonic()
-    if S["resting"]:
+    side, zi = S["barriers"].get(opts.get("barrier_id"), ("", -1))
+    if S["resting"] or side not in S["sides"]:
+        S["quiet_until"] = now + 1.0                            # its last few events are not a stuck desktop
+        S["orphan"] = S["orphan_last"] = 0.0
         try:
             call("Release", GLib.Variant("(oa{sv})", (S["session"], {"activation_id": GLib.Variant("u", opts.get("activation_id", 0))})))
         except Exception:
@@ -346,7 +383,6 @@ def on_activated(_c, _s, _p, _i, _sig, params):
                    "for a few seconds", BOUNCE_REST)
         return
     pos = opts.get("cursor_position") or (0.0, 0.0)
-    side, zi = S["barriers"].get(opts.get("barrier_id"), ("", -1))
     zone = S["zones"][zi] if 0 <= zi < len(S["zones"]) else None
     out(e="activated", side=side, x=float(pos[0]), y=float(pos[1]), zone=zone)
 
@@ -365,15 +401,15 @@ def on_disabled(*_):
 
 
 def rearm():
-    if not S["enabled"] and S["sides"]:
-        set_barriers(S["sides"])
+    if not S["enabled"] and S.get("every"):
+        set_barriers(S["sides"], S["every"])
     return False
 
 
 def on_zones_changed(*_):
     try:
         get_zones()
-        set_barriers(S["sides"])
+        set_barriers(S["sides"], S.get("every"), force=True)       # the screens changed, so the old barriers are void
     except Exception as exc:
         out(e="error", msg=f"couldn't follow a screen change: {exc}")
 
@@ -427,7 +463,7 @@ def on_stdin(_fd, cond):
         if c == "alive":
             S["alive"] = time.monotonic()
         elif c == "barriers":
-            set_barriers(cmd.get("sides") or [])
+            set_barriers(cmd.get("sides") or [], cmd.get("every"))
         elif c == "release":
             release(cmd.get("x"), cmd.get("y"))
         elif c == "quit":

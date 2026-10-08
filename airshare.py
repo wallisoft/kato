@@ -42,7 +42,7 @@ from clickboard_core import common as C
 import airshare_licence as licence
 from airshare_files import BigFiles
 
-VERSION = "0.9.10"
+VERSION = "0.9.12"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -100,6 +100,9 @@ def install_kind():
     if "windowsapps" in sys.executable.lower():
         return "store"
     return "windows" if platform.system() == "Windows" else "linux"
+
+
+TROUBLE = "\u26a0\ufe0f Check log"         # shown in the menu and the window; the menu item opens the log
 
 
 def vtuple(v):
@@ -578,6 +581,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         self.paused = False
         self.sizes = {}                 # machine name -> (w, h), as reported by each machine
         self.versions = {}              # machine name -> AirShare version it reports
+        self.peer_paused = {}           # machine name -> it has said its sharing is paused
         self.hw = hardware_ids()        # this machine's network-card addresses
         self.machine_hw = {}            # machine name -> its addresses, as reported
         self._stand_in = False          # Windows: our own pointer is showing (Windows hid its own)
@@ -682,16 +686,38 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
     def kvm_on(self):
         return self.layout.get("kvm", True)
 
-    def neighbour_of(self, name, side):
-        pos = self.cells().get(name)
+    def reachable(self, name):
+        """Can the pointer go there right now? This machine always; another if it is connected, has reported
+        its screen, and hasn't paused its sharing."""
+        if name == self.cfg.name:
+            return True
+        return bool(self.link_to(name) and name in self.sizes and not self.peer_paused.get(name))
+
+    def neighbour_of(self, name, side, skip=True):
+        """The machine beyond that edge of a machine's screen.
+
+        One that isn't sharing right now (switched off, disconnected or paused) is passed over, so the pointer
+        carries on to the next machine in the same direction: with A, B and C in a row and B off, A's edge leads
+        to C and C's leads back to A. An empty square still ends the row. If nothing that way can be reached,
+        the nearest machine is returned, as it always was, and the caller finds it has no connection.
+        """
+        cells = self.cells()
+        pos = cells.get(name)
         if not pos:
             return None
         dr, dc = STEP[side]
-        want = [pos[0] + dr, pos[1] + dc]
-        return next((n for n, p in self.cells().items() if list(p) == want), None)
+        at = {(p[0], p[1]): n for n, p in cells.items()}
+        nearest, r, c = None, pos[0] + dr, pos[1] + dc
+        while (r, c) in at:
+            found = at[(r, c)]
+            nearest = nearest or found
+            if not skip or self.reachable(found):
+                return found
+            r, c = r + dr, c + dc
+        return nearest
 
-    def neighbour(self, side):
-        return self.neighbour_of(self.cfg.name, side)
+    def neighbour(self, side, skip=True):
+        return self.neighbour_of(self.cfg.name, side, skip)
 
     def link_to(self, name):
         for link in list(self.links.values()):
@@ -792,7 +818,8 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         for link in list(self.links.values()):
             if link.alive:
                 self._send(link, {"type": "screen", "name": self.cfg.name, "w": bw, "h": bh, "version": VERSION,
-                                  "hw": self.hw, "licence": self._licence_key, "licence_at": self._licence_at})
+                                  "hw": self.hw, "licence": self._licence_key, "licence_at": self._licence_at,
+                                  "paused": bool(self.paused)})
                 if self.cells():
                     self._send(link, {"type": "layout", "layout": self.layout})
 
@@ -1174,6 +1201,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
                 self.sizes[name] = (int(header.get("w", 1920)), int(header.get("h", 1080)))
                 self.versions[name] = str(header.get("version", "old"))
                 self._licence_from_peer(header)
+                self.peer_paused[name] = bool(header.get("paused"))
                 hw = [str(h).lower() for h in header.get("hw", []) if h]
                 if hw:
                     self.machine_hw[name] = hw
@@ -1400,6 +1428,11 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         Mesh.on_link_closed(self, link, why)
 
     # ---- status ----
+    def trouble(self):
+        """Something has stopped this computer sharing its keyboard and mouse. The log has the details."""
+        return bool(WAYLAND and self.is_master() and self.kvm_on() and self.capture and self.capture.error
+                    and not self.paused)
+
     def status_line(self):
         if self.transfer_line():
             return self.transfer_line()
@@ -1409,8 +1442,8 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
             return "Paused"
         if time.time() - self._two_mains_at < 20:
             return "Two machines are set as the main computer - open Layout on the one you want and press Apply"
-        if WAYLAND and self.is_master() and self.kvm_on() and self.capture and self.capture.error:
-            return "This computer can't share its keyboard and mouse at the moment (details in the log)"
+        if self.trouble():
+            return TROUBLE
         if WAYLAND and not self.uinput and self.kvm_on():
             return "Run the AirShare installer again so this computer can be controlled"
         if not self.master():
@@ -1502,6 +1535,7 @@ class AirShare(BigFiles, ClipboardSync, Mesh):
         if self.paused:
             threading.Thread(target=self._home_safely, daemon=True).start()
         log("sharing paused" if self.paused else "sharing resumed")
+        self.share_state()                         # so the others pass this machine over while it is paused
         self.refresh_ui()
 
     def leave_remote(self):
@@ -1958,8 +1992,9 @@ class SettingsWindow(Framed, QWidget):
         """Open at the size the content wants, but never taller than the screen (it scrolls instead)."""
         want = self.body.sizeHint()
         avail = (self.screen() or QApplication.primaryScreen()).availableGeometry()
-        w = min(want.width() + self.scroll.verticalScrollBar().sizeHint().width() + 4, avail.width() - 40)
-        h = min(want.height() + 4, avail.height() - 60)
+        margins = self.layout().contentsMargins()
+        w = min(want.width() + margins.left() + margins.right() + 24, avail.width() - 40)
+        h = min(want.height() + margins.top() + margins.bottom() + 20, avail.height() - 60)
         self.resize(max(w, 420), max(h, 300))
 
     def show_version(self):
@@ -2140,15 +2175,20 @@ class Tray:
     def menu_spec(self):
         """What the tray menu should show right now: (kind, text, enabled, action)."""
         a = self.app
+        status = a.status_line()
         spec = [("item", "Resume sharing" if a.paused else "Pause sharing", True, a.toggle_pause),
-                ("item", a.status_line(), False, None), ("sep", "", False, None)]
+                ("item", status, True, view_log) if status == TROUBLE else ("item", status, False, None),
+                ("sep", "", False, None)]
         for side in ("left", "right", "up", "down"):
-            name = a.neighbour(side)
-            if name:
-                mark = "\u25cf" if a.link_for(side) else "\u25cb"
+            where = "above" if side == "up" else "below" if side == "down" else side
+            nearest, used = a.neighbour(side, skip=False), a.neighbour(side)
+            for name in dict.fromkeys(n for n in (nearest, used) if n):
+                on = a.reachable(name)
+                note = " \u00b7 paused" if a.peer_paused.get(name) and a.link_to(name) else ""
+                past = f", past {nearest}" if name != nearest else ""
                 ver = a.versions.get(name)
-                where = "above" if side == "up" else "below" if side == "down" else side
-                spec.append(("item", f"{mark} {name} ({where})" + (f" \u00b7 {ver}" if ver else ""), False, None))
+                mark = "\u25cf" if on else "\u25cb"
+                spec.append(("item", f"{mark} {name} ({where}{past}){note}" + (f" \u00b7 {ver}" if ver else ""), False, None))
         spec.append(("sep", "", False, None))
         if a.update_available():
             spec.append(("item", f"Update available: {a.latest}...", True, a.upgrade))
