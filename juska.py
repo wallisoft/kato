@@ -2188,6 +2188,7 @@ class Tray:
                 item.setEnabled(enabled)
                 if action:
                     item.triggered.connect(action)
+                    item.triggered.connect(self.launch_done)       # (whatever it does, GNOME's spinner stops)
                 self.menu.addAction(item)
         if self.settings and self.settings.isVisible():
             self.settings.tick()
@@ -2244,13 +2245,25 @@ class Tray:
         self.startup.complete()
         QTimer.singleShot(1500, self.startup.complete)
 
+    def launch_done(self):
+        """Picking anything on the tray menu makes GNOME (on Xorg) start a "launching" spinner that waits for a
+        window; most items open none (Pause, Quit...), so tell it we're done: now, and again in case its
+        announcement arrives a moment later."""
+        self.startup.complete()
+        QTimer.singleShot(400, self.startup.complete)
+        QTimer.singleShot(1500, self.startup.complete)
+
     def quit(self):
         self.app.leave_remote()
         if self.app.capture:
             self.app.capture.stop()
         self.app.stop()
         self.icon.hide()
-        self.qapp.quit()
+        # finish GNOME's spinner before going (the menu pick that started it is ours to answer), then quit a
+        # moment later, so the panel hears back about the click and doesn't spin until it gives up
+        self.startup.complete()
+        QTimer.singleShot(250, self.startup.complete)
+        QTimer.singleShot(400, self.qapp.quit)
 
 
 def send_to_running(cmd: str) -> bool:
