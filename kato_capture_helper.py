@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Juska's Wayland capture helper.
+Kato's Wayland capture helper.
 
 Wayland won't let a program watch the keyboard and mouse, or learn when the pointer reaches a screen
 edge. Recent GNOME and KDE offer an official service for exactly this (the InputCapture portal): a
 program asks for a barrier on a screen edge, and when the pointer is pushed against it the desktop hands
 that program the keyboard and mouse until it gives them back.
 
-This small program does that conversation and nothing else. Juska starts it with the SYSTEM Python
+This small program does that conversation and nothing else. Kato starts it with the SYSTEM Python
 (it needs python3-gi and libei, which the desktop already has) and talks to it in lines of JSON:
 
   it prints   {"e":"ready","zones":[[w,h,x,y],...]}        screens the desktop reports
@@ -19,12 +19,12 @@ This small program does that conversation and nothing else. Juska starts it with
   it reads    {"c":"barriers","sides":["left"],"every":["left","right"]}   {"c":"release","x":..,"y":..}
               {"c":"alive"}   {"c":"quit"}
 
-SAFETY. Holding someone's keyboard and mouse is serious, so this program does not rely on Juska to let go:
+SAFETY. Holding someone's keyboard and mouse is serious, so this program does not rely on Kato to let go:
   - it must hear {"c":"alive"} every few seconds while it holds them, or it hands them back;
-  - Esc pressed three times quickly, or Scroll Lock, hands them back here, whatever Juska thinks;
+  - Esc pressed three times quickly, or Scroll Lock, hands them back here, whatever Kato thinks;
   - if input keeps arriving after it has handed them back, it switches capturing off altogether;
   - if the pointer bounces in and out several times in a few seconds, it switches off for a few seconds;
-  - it hands them back if Juska closes the pipe or this program ends for any reason.
+  - it hands them back if Kato closes the pipe or this program ends for any reason.
 """
 import ctypes
 import ctypes.util
@@ -34,7 +34,7 @@ import random
 import sys
 import time
 
-HEARTBEAT_LIMIT = 4.0                 # seconds without "alive" from Juska before input is handed back
+HEARTBEAT_LIMIT = 4.0                 # seconds without "alive" from Kato before input is handed back
 ESC_PRESSES, ESC_WINDOW = 3, 1.5      # the emergency way home, handled here
 KEY_ESC, KEY_SCROLLLOCK = 1, 70
 BOUNCE_COUNT, BOUNCE_WINDOW, BOUNCE_REST = 4, 3.0, 4     # this many captures this fast = something is looping
@@ -80,7 +80,7 @@ def call(method, params, reply=None):
 
 def request(method, build):
     """A portal call that answers later through a Request object. Returns its results, or raises."""
-    token = "juska%d" % random.randrange(1 << 30)
+    token = "kato%d" % random.randrange(1 << 30)
     req_path = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
     answer, inner = {}, GLib.MainLoop()
 
@@ -220,7 +220,7 @@ def switch_off(why, rest):
 
 
 def start_afresh(why):
-    """Stop this helper. That always frees the keyboard and mouse, and Juska starts a new one in a few seconds."""
+    """Stop this helper. That always frees the keyboard and mouse, and Kato starts a new one in a few seconds."""
     out(e="error", msg=why + ": starting the capture afresh")
     loop.quit()
 
@@ -277,13 +277,13 @@ for name, restype, argtypes in (
 
 try:
     res = request("CreateSession", lambda t: GLib.Variant("(sa{sv})", ("", tok(
-        t, session_handle_token=GLib.Variant("s", "juska"), capabilities=GLib.Variant("u", 3)))))
+        t, session_handle_token=GLib.Variant("s", "kato"), capabilities=GLib.Variant("u", 3)))))
     S["session"] = res["session_handle"]
     get_zones()
     reply, fds = conn.call_with_unix_fd_list_sync(BUS, PATH, IFACE, "ConnectToEIS", GLib.Variant("(oa{sv})", (S["session"], {})),
                                                   GLib.VariantType("(h)"), Gio.DBusCallFlags.NONE, -1, None, None)
     ei = lib.ei_new_receiver(None)
-    lib.ei_configure_name(ei, b"Juska")
+    lib.ei_configure_name(ei, b"Kato")
     if lib.ei_setup_backend_fd(ei, fds.get(reply.unpack()[0])) != 0:
         raise RuntimeError("the input channel could not be opened")
 except Exception as exc:
@@ -434,7 +434,7 @@ def watchdog():
             return False
         return True
     if S["activation"] is not None and time.monotonic() - S["alive"] > HEARTBEAT_LIMIT:
-        out(e="error", msg="Juska went quiet while holding the keyboard and mouse: handing them back")
+        out(e="error", msg="Kato went quiet while holding the keyboard and mouse: handing them back")
         release()
         out(e="deactivated")
     return True
@@ -449,7 +449,7 @@ def on_stdin(_fd, cond):
         loop.quit()
         return False
     data = os.read(0, 65536)
-    if not data:                                                # Juska closed the pipe: stop, which frees the input
+    if not data:                                                # Kato closed the pipe: stop, which frees the input
         loop.quit()
         return False
     buf += data

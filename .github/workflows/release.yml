@@ -1,9 +1,9 @@
 name: Release
 
-# Push a tag like v0.3.0 and this compiles Juska to native code with Nuitka,
+# Push a tag like v0.3.0 and this compiles Kato to native code with Nuitka,
 # builds the Windows installer and the Linux package, and publishes them to the
-# PUBLIC repo wallisoft/juska-releases. The source stays in this private repo.
-# Needs the RELEASES_TOKEN secret (fine-grained token: juska-releases, Contents read/write).
+# PUBLIC repo wallisoft/kato-releases. The source stays in this private repo.
+# Needs the RELEASES_TOKEN secret (fine-grained token: kato-releases, Contents read/write).
 
 on:
   push:
@@ -20,10 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: v
-        name: Tag must match VERSION in juska.py
+        name: Tag must match VERSION in kato.py
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          CODE=$(grep -m1 '^VERSION' juska.py | cut -d'"' -f2)
+          CODE=$(grep -m1 '^VERSION' kato.py | cut -d'"' -f2)
           echo "tag=$TAG code=$CODE"
           [ "$TAG" = "$CODE" ] || { echo "::error::Tag v$TAG doesn't match VERSION $CODE"; exit 1; }
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
@@ -42,15 +42,15 @@ jobs:
           python -m pip install -r requirements.txt nuitka ordered-set zstandard
           choco install innosetup -y --no-progress
       - name: Make the icon (a blue dot)
-        run: python packaging/make_icon.py packaging/juska.ico
+        run: python packaging/make_icon.py packaging/kato.ico
       - name: Compile with Nuitka
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads --enable-plugin=pyside6 `
-            --windows-console-mode=disable --windows-icon-from-ico=packaging/juska.ico `
+            --windows-console-mode=disable --windows-icon-from-ico=packaging/kato.ico `
             --include-module=pynput.keyboard._win32 --include-module=pynput.mouse._win32 `
-            --company-name=Wallisoft --product-name=Juska `
+            --company-name=Wallisoft --product-name=Kato `
             --file-version=${{ needs.check.outputs.version }} --product-version=${{ needs.check.outputs.version }} `
-            --output-dir=build juska.py
+            --output-dir=build kato.py
       - name: Compile the secure-desktop service with Nuitka
         run: |
           python -m pip install pywin32
@@ -58,14 +58,14 @@ jobs:
             --include-module=win32timezone --include-module=servicemanager `
             --include-module=ntsecuritycon --include-module=win32security `
             --include-module=win32service --include-module=win32file --include-module=win32pipe `
-            --output-filename=juska-service.exe `
-            --company-name=Wallisoft --product-name="Juska Input Service" `
+            --output-filename=kato-service.exe `
+            --company-name=Wallisoft --product-name="Kato Input Service" `
             --file-version=${{ needs.check.outputs.version }} --product-version=${{ needs.check.outputs.version }} `
-            --output-dir=build packaging/juska_service.py
-      - name: Build Juska-Setup.exe
+            --output-dir=build packaging/kato_service.py
+      - name: Build Kato-Setup.exe
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ needs.check.outputs.version }}" packaging\juska.iss
-      - name: Build Juska.msix (Microsoft Store)
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ needs.check.outputs.version }}" packaging\kato.iss
+      - name: Build Kato.msix (Microsoft Store)
         # Only when the Store identity is set (repository variables, from Partner Center > Product identity).
         # The Store package is the app alone: the lock-screen service cannot be shipped through the Store.
         if: vars.MSIX_IDENTITY_NAME != ''
@@ -78,20 +78,20 @@ jobs:
           $p = "${{ needs.check.outputs.version }}".Split('.'); while ($p.Count -lt 3) { $p += '0' }
           $v = "$($p[0]).$($p[1]).$($p[2]).0"
           New-Item -ItemType Directory msix\Assets -Force | Out-Null
-          Copy-Item -Recurse build\juska.dist\* msix\
+          Copy-Item -Recurse build\kato.dist\* msix\
           Copy-Item packaging\THIRD-PARTY-NOTICES.txt msix\
           python packaging/make_icon.py msix/Assets/Square150x150Logo.png 150
           python packaging/make_icon.py msix/Assets/Square44x44Logo.png 44
           python packaging/make_icon.py msix/Assets/StoreLogo.png 50
           (Get-Content packaging\AppxManifest.xml -Raw).Replace('@IDENTITY_NAME@', $env:ID).Replace('@PUBLISHER@', $env:PUB).Replace('@PUBLISHER_DISPLAY@', $env:PUBDISP).Replace('@VERSION@', $v) | Set-Content msix\AppxManifest.xml -Encoding utf8
           $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-          & $makeappx.FullName pack /d msix /p Juska.msix /o
+          & $makeappx.FullName pack /d msix /p Kato.msix /o
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
-            packaging/Output/Juska-Setup.exe
-            Juska.msix
+            packaging/Output/Kato-Setup.exe
+            Kato.msix
           if-no-files-found: warn
 
   linux:
@@ -112,23 +112,23 @@ jobs:
         run: |
           python -m nuitka --standalone --assume-yes-for-downloads --enable-plugin=pyside6 \
             --include-module=pynput.keyboard._xorg --include-module=pynput.mouse._xorg \
-            --include-module=juska_uinput --include-module=juska_capture \
-            --include-package=Xlib --output-dir=build juska.py
+            --include-module=kato_uinput --include-module=kato_capture \
+            --include-package=Xlib --output-dir=build kato.py
       - name: Package
         run: |
-          mv build/juska.dist juska
-          python packaging/make_icon.py juska/juska.png
-          cp packaging/THIRD-PARTY-NOTICES.txt juska/
+          mv build/kato.dist kato
+          python packaging/make_icon.py kato/kato.png
+          cp packaging/THIRD-PARTY-NOTICES.txt kato/
           # The Wayland capture helper is run by the system Python, so it ships as a plain script next to the program.
-          cp juska_capture_helper.py juska/
-          test -f juska/juska_capture_helper.py && python3 -m py_compile juska_capture_helper.py
-          tar czf juska-linux-x86_64.tar.gz juska
+          cp kato_capture_helper.py kato/
+          test -f kato/kato_capture_helper.py && python3 -m py_compile kato_capture_helper.py
+          tar czf kato-linux-x86_64.tar.gz kato
           cp packaging/install.sh install.sh
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: |
-            juska-linux-x86_64.tar.gz
+            kato-linux-x86_64.tar.gz
             install.sh
 
   publish:
@@ -140,21 +140,21 @@ jobs:
           merge-multiple: true
       - name: Make sure everything made it
         run: |
-          for f in Juska-Setup.exe juska-linux-x86_64.tar.gz install.sh; do
+          for f in Kato-Setup.exe kato-linux-x86_64.tar.gz install.sh; do
             find . -name "$f" | grep -q . || { echo "::error::$f is missing"; exit 1; }
           done
-          find . -name Juska.msix | grep -q . && echo "Store package included" || echo "no Store package this time (set the MSIX_* variables)"
+          find . -name Kato.msix | grep -q . && echo "Store package included" || echo "no Store package this time (set the MSIX_* variables)"
       - uses: softprops/action-gh-release@v2
         with:
-          repository: wallisoft/juska-releases
+          repository: wallisoft/kato-releases
           token: ${{ secrets.RELEASES_TOKEN }}
           tag_name: ${{ github.ref_name }}
-          name: Juska ${{ needs.check.outputs.version }}
+          name: Kato ${{ needs.check.outputs.version }}
           body: |
-            **Windows 10 and 11:** download `Juska-Setup.exe` and run it.
-            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; X11 and Wayland):** `curl -fsSL https://github.com/wallisoft/juska-releases/releases/latest/download/install.sh | bash`
+            **Windows 10 and 11:** download `Kato-Setup.exe` and run it.
+            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; X11 and Wayland):** `curl -fsSL https://github.com/wallisoft/kato-releases/releases/latest/download/install.sh | bash`
           files: |
-            **/Juska-Setup.exe
-            **/juska-linux-x86_64.tar.gz
+            **/Kato-Setup.exe
+            **/kato-linux-x86_64.tar.gz
             **/install.sh
-            **/Juska.msix
+            **/Kato.msix

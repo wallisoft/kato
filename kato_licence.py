@@ -1,8 +1,8 @@
 """
-Juska: Pro licences.
+Kato: Pro licences.
 
 A licence key is a short signed statement, "pro | how many computers | id | date", issued by tiny-web.uk when
-someone buys Juska Pro. It is checked here with the public half of the signing key, so it needs no account and
+someone buys Kato Pro. It is checked here with the public half of the signing key, so it needs no account and
 no internet, and nobody can make one without the private half, which never leaves the server.
 
     ASP1-<payload, base64url>.<signature, base64url>

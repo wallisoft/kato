@@ -1,7 +1,7 @@
 """
-Juska input service (Windows, optional).
+Kato input service (Windows, optional).
 
-Runs as SYSTEM so Juska can inject keyboard and mouse input onto Windows' *secure* desktops too:
+Runs as SYSTEM so Kato can inject keyboard and mouse input onto Windows' *secure* desktops too:
 the UAC prompt and the login screen, which a normal program is not allowed to touch. This matters for
 headless machines (a server in a cupboard) with no keyboard or mouse of their own to answer a UAC
 prompt with.
@@ -10,9 +10,9 @@ Deliberately small and dumb, to keep the attack surface tiny:
   * Listens ONLY on a local named pipe, never the network.
   * The pipe is locked to Administrators and SYSTEM, so only an elevated local process can open it.
   * Accepts ONLY input commands (move, button, scroll, key). There is no "run program" command.
-  * Does nothing on its own: it injects only what the already-authenticated Juska app sends.
+  * Does nothing on its own: it injects only what the already-authenticated Kato app sends.
 
-All of Juska's security (TLS between machines, the shared passphrase, the crossing and safety
+All of Kato's security (TLS between machines, the shared passphrase, the crossing and safety
 logic) stays in the app. This service is just the last inch of injection on a privileged desktop.
 
 How it is put together (Windows keeps services in a session of their own with no screen, so input sent from
@@ -23,15 +23,15 @@ the service itself would go nowhere):
   * the AGENT (the same program started with "agent", still SYSTEM, but inside that session) owns the pipe and
     does the typing, hopping onto whichever desktop is showing: the user's, the lock screen or a UAC prompt.
 
-The pipe admits the logged-in user, because Juska itself is an ordinary program. So the agent also checks
-that whoever connects really is the installed juska.exe sitting beside it, and drops anyone else.
+The pipe admits the logged-in user, because Kato itself is an ordinary program. So the agent also checks
+that whoever connects really is the installed kato.exe sitting beside it, and drops anyone else.
 
-Everything it does and every reason it refuses is written to service.log in the ProgramData folder, under Juska.
+Everything it does and every reason it refuses is written to service.log in the ProgramData folder, under Kato.
 
-  juska-service.exe install     register and set to start at boot
-  juska-service.exe remove      stop and unregister
-  juska-service.exe run         (used by Windows) the service
-  juska-service.exe agent       (used by the service) the part that types
+  kato-service.exe install     register and set to start at boot
+  kato-service.exe remove      stop and unregister
+  kato-service.exe run         (used by Windows) the service
+  kato-service.exe agent       (used by the service) the part that types
 """
 import ctypes
 import json
@@ -49,11 +49,11 @@ import win32service
 import win32file
 import win32pipe
 
-PIPE_NAME = r"\\.\pipe\JuskaInput"
-SVC_NAME = "JuskaInput"
-SVC_DISPLAY = "Juska Input Service"
-SVC_DESC = ("Lets Juska control this computer at the Windows login and security (UAC) screens. "
-            "Optional; installed only if you chose that during Juska setup.")
+PIPE_NAME = r"\\.\pipe\KatoInput"
+SVC_NAME = "KatoInput"
+SVC_DISPLAY = "Kato Input Service"
+SVC_DESC = ("Lets Kato control this computer at the Windows login and security (UAC) screens. "
+            "Optional; installed only if you chose that during Kato setup.")
 
 # ----- SendInput plumbing ---------------------------------------------------
 ULONG_PTR = ctypes.POINTER(ctypes.c_ulong)
@@ -147,7 +147,7 @@ def attach_input_desktop():
 
 
 def pipe_security():
-    """SYSTEM and Administrators in full; the interactively logged-in user may read and write (Juska runs as
+    """SYSTEM and Administrators in full; the interactively logged-in user may read and write (Kato runs as
     them). Who is really on the other end is checked separately, see genuine_client()."""
     sd = win32security.SECURITY_DESCRIPTOR()
     dacl = win32security.ACL()
@@ -164,7 +164,7 @@ def pipe_security():
 
 
 # ----- a log, because nobody can see a service ------------------------------
-LOG_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "Juska")
+LOG_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "Kato")
 
 
 def note(msg):
@@ -214,8 +214,8 @@ kernel32.CloseHandle.argtypes = [HANDLE]
 
 
 def genuine_client(pipe):
-    """Is the program on the other end of the pipe the installed juska.exe beside this service?"""
-    expected = os.path.normcase(os.path.join(os.path.dirname(os.path.dirname(own_exe())), "juska.exe"))
+    """Is the program on the other end of the pipe the installed kato.exe beside this service?"""
+    expected = os.path.normcase(os.path.join(os.path.dirname(os.path.dirname(own_exe())), "kato.exe"))
     pid = wintypes.ULONG(0)
     if not kernel32.GetNamedPipeClientProcessId(int(getattr(pipe, "handle", pipe)), ctypes.byref(pid)):
         return False, "couldn't tell who connected"
@@ -244,9 +244,9 @@ def run_agent():
             win32pipe.ConnectNamedPipe(pipe, None)
             ok, who = genuine_client(pipe)
             if not ok:
-                note(f"turned away a connection that wasn't Juska: {who}")
+                note(f"turned away a connection that wasn't Kato: {who}")
                 continue
-            note("Juska connected")
+            note("Kato connected")
             failed = 0
             while True:
                 try:
@@ -264,7 +264,7 @@ def run_agent():
                     failed += 1
                     if failed <= 5:
                         note(f"couldn't inject: {exc}")
-            note("Juska disconnected")
+            note("Kato disconnected")
         except Exception:
             note("agent pipe error:\n" + traceback.format_exc())
             time.sleep(1)
@@ -426,7 +426,7 @@ def run_as_service():
     if not advapi32.StartServiceCtrlDispatcherW(table):
         err = ctypes.get_last_error()
         note(f"not started by Windows' service manager (error {err}); this program is run by the service, not by hand")
-        print(f"This is the Juska Input Service. Windows starts it; it can't be run by hand (error {err}).")
+        print(f"This is the Kato Input Service. Windows starts it; it can't be run by hand (error {err}).")
 
 
 # ----- install / remove, via Windows' own service manager -------------------
@@ -470,7 +470,7 @@ def install():
         win32service.StartService(h, None)
         win32service.CloseServiceHandle(h)
         note(f"installed as {exe} and started")
-        print("JuskaInput installed and started")
+        print("KatoInput installed and started")
     except Exception:
         note("install failed:\n" + traceback.format_exc())
         raise
@@ -483,10 +483,10 @@ def remove():
     try:
         _stop_and_delete(scm)
         note("removed")
-        print("JuskaInput removed")
+        print("KatoInput removed")
     except Exception as exc:
         note(f"not removed: {exc}")
-        print(f"JuskaInput not removed: {exc}")
+        print(f"KatoInput not removed: {exc}")
     finally:
         win32service.CloseServiceHandle(scm)
 
