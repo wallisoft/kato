@@ -1,32 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="3 8 122 112">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#60a5fa"/>
-      <stop offset="1" stop-color="#2563eb"/>
+    <linearGradient id="fx" x1="0.1" y1="0" x2="0.9" y2="0.3">
+      <stop offset="0" stop-color="#4C86C6"/><stop offset="0.45" stop-color="#7FB3E6"/><stop offset="0.7" stop-color="#5A95D2"/><stop offset="1" stop-color="#3C72B4"/>
+    </linearGradient>
+    <linearGradient id="fxb" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4C86C6"/><stop offset="1" stop-color="#36699F"/>
+    </linearGradient>
+    <linearGradient id="bndx" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22395A"/><stop offset="1" stop-color="#132338"/>
     </linearGradient>
   </defs>
-  <!-- rounded tile -->
-  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
-  <!-- left screen -->
-  <rect x="62" y="150" width="168" height="120" rx="16" fill="#ffffff" fill-opacity="0.95"/>
-  <rect x="132" y="270" width="28" height="30" fill="#ffffff" fill-opacity="0.95"/>
-  <rect x="102" y="298" width="88" height="14" rx="7" fill="#ffffff" fill-opacity="0.95"/>
-  <!-- right screen -->
-  <rect x="282" y="150" width="168" height="120" rx="16" fill="#ffffff" fill-opacity="0.95"/>
-  <rect x="352" y="270" width="28" height="30" fill="#ffffff" fill-opacity="0.95"/>
-  <rect x="322" y="298" width="88" height="14" rx="7" fill="#ffffff" fill-opacity="0.95"/>
-  <!-- the glide: a dashed arc from one screen to the other -->
-  <path d="M150 210 C 210 120, 302 120, 362 196" fill="none" stroke="#1e3a8a" stroke-width="12"
-        stroke-linecap="round" stroke-dasharray="2 26"/>
-  <!-- pointer arriving on the right screen -->
-  <path d="M352 182 L352 252 L370 236 L383 264 L396 258 L383 231 L407 229 Z"
-        fill="#1e3a8a" stroke="#ffffff" stroke-width="8" stroke-linejoin="round"/>
-  <!-- keyboard -->
-  <rect x="142" y="352" width="228" height="62" rx="14" fill="#ffffff" fill-opacity="0.95"/>
-  <g fill="#93c5fd">
-    <rect x="162" y="366" width="26" height="14" rx="3"/><rect x="196" y="366" width="26" height="14" rx="3"/>
-    <rect x="230" y="366" width="26" height="14" rx="3"/><rect x="264" y="366" width="26" height="14" rx="3"/>
-    <rect x="298" y="366" width="26" height="14" rx="3"/><rect x="332" y="366" width="20" height="14" rx="3"/>
-    <rect x="196" y="388" width="120" height="14" rx="3"/>
+  <g transform="translate(64 64) rotate(-8) translate(-64 -64)">
+    <ellipse cx="62" cy="101" rx="54" ry="8" fill="#0A1018" opacity="0.28"/>
+    <!-- brim: wide confident snap, same felt -->
+    <path d="M9,85 C4,72 20,69 34,77 C50,86 78,86 94,77 C109,69 124,72 119,85 C110,98 86,104 64,104 C42,104 18,98 9,85 Z"
+          fill="url(#fxb)" stroke="#0A1A2B" stroke-width="3.2" stroke-linejoin="round"/>
+    <!-- crown: teardrop with a soft front pinch -->
+    <path d="M37,80 C31,50 37,32 49,28 C55,26 57,33 61,32 C63,31.4 63,27 65,27 C67,27 67.5,31.6 70,32.4 C74,33.6 76,27 82,30 C93,35 96,54 91,80 C79,86 49,86 37,80 Z"
+          fill="url(#fx)" stroke="#0A1A2B" stroke-width="3.2" stroke-linejoin="round"/>
+    <!-- band -->
+    <path d="M36,68 C49,75 79,75 92,68 L91,79 C79,85 49,85 37,79 Z"
+          fill="url(#bndx)" stroke="#0A1A2B" stroke-width="3.2" stroke-linejoin="round"/>
+    <!-- bold gloss on the crown -->
+    <path d="M47,33 C40,47 40,60 44,72 C50,66 52,50 56,37 C53,33 50,32 47,33 Z" fill="#CFE6FB" opacity="0.45"/>
+    <path d="M60,30 C72,30 83,40 87,54" fill="none" stroke="#E8F3FE" stroke-width="3" opacity="0.6" stroke-linecap="round"/>
+    <!-- brim top sheen -->
+    <path d="M30,86 C46,93 82,93 98,86" fill="none" stroke="#9FC6EC" stroke-width="2.2" opacity="0.5" stroke-linecap="round"/>
   </g>
 </svg>
