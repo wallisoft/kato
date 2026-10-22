@@ -124,12 +124,22 @@ jobs:
           test -f kato/kato_capture_helper.py && python3 -m py_compile kato_capture_helper.py
           tar czf kato-linux-x86_64.tar.gz kato
           cp packaging/install.sh install.sh
+          # Linux packages: .deb (Debian/Ubuntu/Mint) + no-FUSE AppImage (all other distros)
+          chmod +x packaging/linux-package.sh
+          packaging/linux-package.sh --bundle kato --name kato --app "Kato KVM" \
+            --version "${{ needs.check.outputs.version }}" --exe kato.bin --icon kato/kato.png \
+            --desc "One keyboard and mouse for all your computers. Windows and Linux." \
+            --depends "libc6, libgl1, libegl1, libxcb-cursor0, libxkbcommon-x11-0" --out dist
+          mv dist/kato_*_amd64.deb kato-amd64.deb
+          mv dist/Kato-KVM-*-x86_64.AppImage Kato-x86_64.AppImage
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: |
             kato-linux-x86_64.tar.gz
             install.sh
+            kato-amd64.deb
+            Kato-x86_64.AppImage
 
   publish:
     needs: [check, windows, linux]
@@ -140,7 +150,7 @@ jobs:
           merge-multiple: true
       - name: Make sure everything made it
         run: |
-          for f in Kato-Setup.exe kato-linux-x86_64.tar.gz install.sh; do
+          for f in Kato-Setup.exe kato-linux-x86_64.tar.gz install.sh kato-amd64.deb Kato-x86_64.AppImage; do
             find . -name "$f" | grep -q . || { echo "::error::$f is missing"; exit 1; }
           done
           find . -name Kato.msix | grep -q . && echo "Store package included" || echo "no Store package this time (set the MSIX_* variables)"
@@ -152,9 +162,13 @@ jobs:
           name: Kato ${{ needs.check.outputs.version }}
           body: |
             **Windows 10 and 11:** download `Kato-Setup.exe` and run it.
-            **Linux (Ubuntu, Mint, Debian, Fedora, Arch and similar; X11 and Wayland):** `curl -fsSL https://github.com/wallisoft/kato-releases/releases/latest/download/install.sh | bash`
+            **Linux — Ubuntu / Mint / Debian:** download `kato-amd64.deb` and double-click (or `sudo apt install ./kato-amd64.deb`).
+            **Linux — any other distro:** download `Kato-x86_64.AppImage`, make it executable, run it.
+            **Linux — one-liner (any distro):** `curl -fsSL https://github.com/wallisoft/kato-releases/releases/latest/download/install.sh | bash`
           files: |
             **/Kato-Setup.exe
             **/kato-linux-x86_64.tar.gz
             **/install.sh
             **/Kato.msix
+            **/kato-amd64.deb
+            **/Kato-x86_64.AppImage
