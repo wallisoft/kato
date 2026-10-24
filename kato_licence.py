@@ -12,7 +12,7 @@ import re
 
 PUBLIC_KEY = "a10f27df2f62cbb78f726b36c3b858e0ca7ae3d2304d03a9168f77290c10f53c"
 FREE_COMPUTERS = 3
-BUY_URL = "https://juska.uk/#pricing"
+BUY_URL = "https://kato.vml.onl/#pricing"
 
 
 def _unb64(text):

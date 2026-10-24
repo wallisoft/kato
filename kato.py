@@ -46,7 +46,7 @@ from clickboard_core import common as C
 import kato_licence as licence
 from kato_files import BigFiles
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -65,8 +65,8 @@ GREEN, BLUE, ORANGE = QColor(34, 197, 94), QColor(59, 130, 246), QColor(249, 115
 RELEASES_API = "https://api.github.com/repos/wallisoft/kato-releases/releases/latest"
 SETUP_URL = "https://github.com/wallisoft/kato-releases/releases/latest/download/Kato-Setup.exe"
 LINUX_INSTALL = "curl -fsSL https://github.com/wallisoft/kato-releases/releases/latest/download/install.sh | bash"
-STORE_URL = "ms-windows-store://pdp/?productid=9MSPVD4001W5"     # Kato in the Microsoft Store
-WEBSITE = "https://juska.uk/#download"
+STORE_URL = "ms-windows-store://pdp/?productid=9NC0S7C163TV"     # Kato in the Microsoft Store
+WEBSITE = "https://kato.vml.onl/#get"
 UPDATE_CHECK_EVERY = 6 * 3600
 
 
@@ -1859,7 +1859,7 @@ def about_dialog(parent=None):
         "Windows and Linux, X11 and Wayland. Free for up to three computers.</p>"
         "<p>Created by Steve Wallis, Wallisoft.<br>"
         "Designed and built with Claude, by Anthropic.</p>"
-        '<p><a href="https://juska.uk">juska.uk</a> &nbsp;\u00b7&nbsp; '
+        '<p><a href="https://kato.vml.onl">kato.vml.onl</a> &nbsp;\u00b7&nbsp; '
         '<a href="https://tiny-web.uk">tiny-web.uk</a></p>'
         "<p><small>The interface uses Qt under the LGPL; see the third-party notices installed with Kato."
         "</small></p>")
