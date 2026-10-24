@@ -31,7 +31,10 @@ import sys
 import threading
 import time
 
-from pynput import keyboard, mouse
+try:
+    from pynput import keyboard, mouse
+except Exception:                      # a headless box has no display; the input service injects via uinput only
+    keyboard = mouse = None
 from PySide6.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QTextOption
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
@@ -43,7 +46,7 @@ from clickboard_core import common as C
 import kato_licence as licence
 from kato_files import BigFiles
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -297,6 +300,30 @@ LINUX = platform.system() == "Linux"
 WINDOWS = platform.system() == "Windows"
 # A Wayland session: the X11 ways of watching and driving input only reach X11 programs here.
 WAYLAND = LINUX and (os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY")))
+
+# The headless input service (drive the login screen and machines with nobody logged in): it runs as root at
+# boot, so it always has /dev/uinput and never has a display. It forces the uinput path and skips everything
+# that needs a desktop (pynput, the cursor, the tray, clipboard sync).
+INPUT_SERVICE = ("--input-service" in sys.argv)
+
+
+def drm_screen_size():
+    """The panel's real resolution straight from the kernel (no display server needed), for the input service.
+    Falls back to 1920x1080 when nothing is connected yet (a truly headless box): the pointer is sent as a
+    fraction of the screen, so an exact match only affects aspect, never whether a click lands."""
+    import glob
+    for modes in sorted(glob.glob("/sys/class/drm/*/modes")):
+        try:
+            status = os.path.join(os.path.dirname(modes), "status")
+            if os.path.exists(status) and open(status).read().strip() != "connected":
+                continue
+            first = open(modes).read().split("\n")[0].strip().lower()
+            if "x" in first:
+                w, h = first.split("x", 1)
+                return (int(re.sub(r"\D", "", w) or 0), int(re.sub(r"\D", "", h) or 0))
+        except Exception:
+            pass
+    return (1920, 1080)
 
 
 class XGrabber:
@@ -590,10 +617,16 @@ class Kato(BigFiles, ClipboardSync, Mesh):
         self.cfg.paused = False
         self.layout = layout            # {"cells": {name: [r, c]}, "master": name, "version": t}
         self.bridge = bridge
-        self.bounds = screen_bounds()
-        self.mouse = mouse.Controller()
-        self.kb = keyboard.Controller()
-        self.cursor = CursorHider()
+        if INPUT_SERVICE:
+            w, h = drm_screen_size()
+            self.bounds = (0, 0, w, h)       # driven-only: we report our size, we never read a display
+            self.mouse = self.kb = None      # the service injects only through uinput, never pynput
+            self.cursor = None
+        else:
+            self.bounds = screen_bounds()
+            self.mouse = mouse.Controller()
+            self.kb = keyboard.Controller()
+            self.cursor = CursorHider()
         self.paused = False
         self.sizes = {}                 # machine name -> (w, h), as reported by each machine
         self.versions = {}              # machine name -> Kato version it reports
@@ -628,7 +661,7 @@ class Kato(BigFiles, ClipboardSync, Mesh):
         self._held_keys = {}
         self._outq = queue.Queue()      # input callbacks never touch the network themselves
         threading.Thread(target=self._send_loop, daemon=True).start()
-        self.xgrab = XGrabber() if LINUX else None
+        self.xgrab = None if INPUT_SERVICE else (XGrabber() if LINUX else None)
         if LINUX:
             threading.Thread(target=self._self_heal, daemon=True).start()
         self.uinput = None              # Wayland: the virtual mouse and keyboard we are driven through
@@ -642,7 +675,7 @@ class Kato(BigFiles, ClipboardSync, Mesh):
     def _ensure_uinput(self):
         """Wayland only: create the virtual devices if they aren't there yet. Tried again each time another
         machine wants to drive this one, so it starts working as soon as the installer has granted access."""
-        if not WAYLAND or self.uinput:
+        if not (WAYLAND or INPUT_SERVICE) or self.uinput:
             return bool(self.uinput)
         try:
             import importlib
@@ -697,6 +730,8 @@ class Kato(BigFiles, ClipboardSync, Mesh):
         return self.layout.get("master")
 
     def is_master(self):
+        if INPUT_SERVICE:
+            return False       # the input service is driven-only: it is never the main computer
         return self.master() == self.cfg.name
 
     def kvm_on(self):
@@ -915,6 +950,8 @@ class Kato(BigFiles, ClipboardSync, Mesh):
 
     def apply_role(self):
         """Only the main computer listens to input. The others install no hooks at all."""
+        if INPUT_SERVICE:
+            return             # driven-only: no edge-watching, no capture, ever
         want = self.is_master() and self.kvm_on()
         if WAYLAND:
             # Wayland hides the keyboard and mouse from ordinary programs; the desktop's own capture service
@@ -2275,6 +2312,57 @@ def send_to_running(cmd: str) -> bool:
         return False
 
 
+def run_input_service(a):
+    """Headless, usually as root at boot: create the virtual keyboard and mouse and be driven, so the login
+    screen and machines with nobody logged in can be controlled. No tray, no clipboard, offscreen Qt. The
+    passphrase and name come from the unit's environment (KATO_PASSPHRASE, KATO_NAME) or the saved config."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    set_app("Kato", VERSION)
+    C.DEFAULT_PORT, C.BEACON_PORT = PORT, BEACON_PORT
+    C.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    layout_file = C.CONFIG_DIR / "layout.json"
+    layout = json.loads(layout_file.read_text()) if layout_file.exists() else {}
+    if "cells" not in layout:
+        layout = {"cells": {}, "version": 0}
+    layout.setdefault("master", None)
+    layout.setdefault("kvm", True)
+
+    qapp = QApplication(sys.argv)
+    qapp.setQuitOnLastWindowClosed(False)
+    bridge = Bridge()
+    app = Kato(layout, bridge)
+    app.cfg.name = a.name or os.environ.get("KATO_NAME") or app.cfg.name
+    pw = a.passphrase or os.environ.get("KATO_PASSPHRASE")
+    if pw:
+        app.cfg.passphrase = pw
+    app.cfg.mode, app.cfg.port = "local", PORT
+    app.cfg.save()
+    app._set_local_key()
+
+    app.start()
+    app.apply_role()                     # a client installs no listeners; this is a no-op here
+    threading.Thread(target=app.layout_loop, daemon=True).start()
+    if app.uinput:
+        log(f"input service: ready as '{app.cfg.name}', virtual keyboard and mouse up, screen {app.bounds[2]}x{app.bounds[3]}")
+    else:
+        log(f"input service: WARNING - no /dev/uinput, nothing can be injected ({app.uinput_error or 'is the uinput module loaded?'})")
+
+    import signal
+    def _bye(*_):
+        try:
+            if app.uinput:
+                app.uinput.release_all()
+        except Exception:
+            pass
+        QTimer.singleShot(0, qapp.quit)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _bye)
+    tick = QTimer()                       # let Python notice the signals
+    tick.timeout.connect(lambda: None)
+    tick.start(250)
+    sys.exit(qapp.exec())
+
+
 def main():
     def thread_crashed(args):                                 # a background thread that dies must not die silently
         log(f"internal error in a background thread ({getattr(args.thread, 'name', '?')}): "
@@ -2284,7 +2372,13 @@ def main():
     ap.add_argument("--passphrase", help="shared passphrase (same on every machine, 8+ characters)")
     ap.add_argument("--name", help="this machine's name (default: its hostname)")
     ap.add_argument("--quit", action="store_true", help="quit the running copy")
+    ap.add_argument("--input-service", action="store_true",
+                    help="run headless as the input service (drive the login screen); for the system service")
     a = ap.parse_args()
+
+    if a.input_service:
+        run_input_service(a)
+        return
 
     if send_to_running("quit" if a.quit else "settings") or a.quit:
         return

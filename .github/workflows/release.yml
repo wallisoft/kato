@@ -121,6 +121,7 @@ jobs:
           cp packaging/THIRD-PARTY-NOTICES.txt kato/
           # The Wayland capture helper is run by the system Python, so it ships as a plain script next to the program.
           cp kato_capture_helper.py kato/
+          cp packaging/kato-input.service kato/
           test -f kato/kato_capture_helper.py && python3 -m py_compile kato_capture_helper.py
           tar czf kato-linux-x86_64.tar.gz kato
           cp packaging/install.sh install.sh

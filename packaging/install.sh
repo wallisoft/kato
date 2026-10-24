@@ -13,6 +13,8 @@ main() {
     local URL="${KATO_URL:-https://github.com/wallisoft/kato-releases/releases/latest/download/kato-linux-x86_64.tar.gz}"
     local DEST="$HOME/.local/opt/kato"
     local LOG="$HOME/.config/kato/start.log"
+    local WANT_GREETER=""
+    local arg; for arg in "$@"; do case "$arg" in --greeter|--input-service) WANT_GREETER=1;; esac; done
 
     if [ "$(id -u)" -eq 0 ]; then
         echo "Please run this as your normal user, not root. It asks for sudo only when it needs it." >&2
@@ -100,6 +102,11 @@ main() {
     fi
     chmod +x "$DEST/kato" 2>/dev/null || true
 
+    if [ -n "$WANT_GREETER" ]; then
+        setup_input_service
+        return
+    fi
+
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.config/autostart" "$HOME/.config/kato"
     ln -sf "$DEST/kato" "$HOME/.local/bin/kato"
     cat > "$HOME/.local/share/applications/kato.desktop" << DESKTOP
@@ -182,6 +189,54 @@ DESKTOP
         echo "    Clipboard sharing may be unreliable on Wayland."
     fi
     if [ -n "$CLIP_WARNING" ]; then echo "  - $CLIP_WARNING"; fi
+}
+
+setup_input_service() {
+    # A driven-only / headless machine: a root service owns the virtual keyboard and mouse from boot, so the
+    # login screen (and a machine with nobody logged in) can be driven. The per-user app is NOT autostarted
+    # here - the service is this machine's single presence on the mesh, which keeps one keyboard, not two.
+    echo "==> Setting up the Kato input service (drives the login screen; for driven-only and headless machines)"
+    local cfg="$HOME/.config/kato/config.json" name pass n2
+    name="$(hostname)"
+    if [ -f "$cfg" ]; then
+        pass="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("passphrase",""))' "$cfg" 2>/dev/null || true)"
+        n2="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name",""))' "$cfg" 2>/dev/null || true)"
+        [ -n "$n2" ] && name="$n2"
+    fi
+    pass="${KATO_PASSPHRASE:-${pass:-}}"
+    name="${KATO_NAME:-$name}"
+    if [ -z "$pass" ]; then
+        printf "    Shared passphrase for this machine to join with: " >&2
+        read -r pass < /dev/tty || true
+    fi
+
+    sudo install -d -m 755 /etc/kato
+    printf 'KATO_NAME=%s\nKATO_PASSPHRASE=%s\n' "$name" "$pass" | sudo tee /etc/kato/service.env >/dev/null
+    sudo chmod 600 /etc/kato/service.env
+    echo uinput | sudo tee /etc/modules-load.d/kato-uinput.conf >/dev/null
+    sudo modprobe uinput 2>/dev/null || true
+
+    if [ ! -f "$DEST/kato-input.service" ]; then
+        echo "    This build has no service unit (older package); re-download and try again." >&2
+        return 1
+    fi
+    sed "s|__KATO__|$DEST/kato|" "$DEST/kato-input.service" | sudo tee /etc/systemd/system/kato-input.service >/dev/null
+    rm -f "$HOME/.config/autostart/kato.desktop"
+    pkill -f "$DEST/kato" 2>/dev/null || true
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now kato-input.service
+    sleep 2
+    echo
+    if systemctl is-active --quiet kato-input.service; then
+        echo "Done. The input service is running."
+        echo "  - This machine can be driven at the login screen and once logged in."
+        echo "  - On your main computer, add '$name' to the Kato grid to drive it."
+        echo "  - Logs:  sudo journalctl -u kato-input.service -f"
+    else
+        echo "The input service was installed but did not start. What it said:" >&2
+        sudo journalctl -u kato-input.service -n 30 --no-pager >&2 || true
+        exit 1
+    fi
 }
 
 main "$@"

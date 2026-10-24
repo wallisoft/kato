@@ -1,0 +1,18 @@
+[Unit]
+Description=Kato input service - drive the login screen and machines with nobody logged in
+Documentation=https://juska.uk
+After=network-online.target systemd-logind.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/kato/service.env
+Environment=QT_QPA_PLATFORM=offscreen
+# the uinput module may be built-in; '-' means "carry on if modprobe can't"
+ExecStartPre=-/sbin/modprobe uinput
+ExecStart=__KATO__ --input-service
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
