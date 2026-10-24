@@ -46,12 +46,12 @@ from clickboard_core import common as C
 import kato_licence as licence
 from kato_files import BigFiles
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
 BACK_OFF = 24                         # pixels inside the edge when the pointer comes home
-RETURN_KEY = keyboard.Key.scroll_lock
+RETURN_KEY = keyboard.Key.scroll_lock if keyboard else None   # master-side 'come home' key; unused by the headless service
 ESCAPE_PRESSES, ESCAPE_WINDOW = 3, 1.2
 ALIVE_EVERY, ALIVE_TIMEOUT = 1.0, 3.0
 LAYOUT_EVERY = 5                      # re-share layout and screen size so late joiners pick them up
