@@ -46,7 +46,7 @@ from clickboard_core import common as C
 import kato_licence as licence
 from kato_files import BigFiles
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -70,21 +70,59 @@ WEBSITE = "https://kato.vml.onl/#get"
 UPDATE_CHECK_EVERY = 6 * 3600
 
 
+def _perm_mac_linux(dev):
+    """The permanent (burned-in) MAC of a physical interface - not the current one, which Wi-Fi randomises per OS
+    and per network. ethtool -P gives it straight; without ethtool we trust the current address only when the
+    kernel marks it permanent (addr_assign_type 0) and skip a randomised one (it could never match the same card
+    under the other OS)."""
+    try:
+        out = subprocess.run(["ethtool", "-P", dev], capture_output=True, text=True, timeout=3).stdout.lower()
+        m = re.search(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})", out)
+        if m and m.group(1) != "00:00:00:00:00:00":
+            return m.group(1)
+    except Exception:
+        pass
+    try:
+        if open(f"/sys/class/net/{dev}/addr_assign_type").read().strip() == "0":
+            cur = open(f"/sys/class/net/{dev}/address").read().strip().lower()
+            if cur and cur != "00:00:00:00:00:00":
+                return cur
+    except Exception:
+        pass
+    return None
+
+
 def hardware_ids():
-    """This computer's physical network-card addresses. A dual-boot machine has the same card under
-    both systems, so these say "same computer" even when the name differs."""
+    """This computer's physical network cards' PERMANENT addresses. A dual-boot machine has the same cards under
+    both systems, so these say "same computer" even when the name differs. We take the PERMANENT (burned-in)
+    address, never the current one: Wi-Fi randomises the current address per OS, but the permanent address is the
+    same under Linux and Windows - so the match holds even on a laptop with no wired port. Virtual adapters
+    (Docker, WSL, Hyper-V, VPNs, Bluetooth) are left out on both systems: they add noise, and some share one fixed
+    address across different machines, which would wrongly merge two boxes into one."""
     found = set()
     try:
         if platform.system() == "Linux":
-            for dev in os.listdir("/sys/class/net"):
+            for dev in sorted(os.listdir("/sys/class/net")):
                 if dev == "lo" or not os.path.exists(f"/sys/class/net/{dev}/device"):
                     continue                                  # virtual: docker, bridges, VPNs
-                with open(f"/sys/class/net/{dev}/address") as f:
-                    found.add(f.read().strip().lower())
+                mac = _perm_mac_linux(dev)
+                if mac:
+                    found.add(mac)
         elif platform.system() == "Windows":
-            out = subprocess.run(["getmac", "/fo", "csv", "/nh"], capture_output=True, text=True,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5).stdout
-            for m in re.findall(r"([0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){5})", out):
+            ps = ("Get-NetAdapter -Physical | ForEach-Object { "
+                  "if ($_.PermanentAddress -and $_.PermanentAddress -ne '00-00-00-00-00-00') "
+                  "{ $_.PermanentAddress } else { $_.MacAddress } }")
+            out = ""
+            try:                                              # physical adapters only, burned-in address
+                out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                                     capture_output=True, text=True,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=8).stdout
+            except Exception:
+                out = ""
+            if not re.search(r"[0-9A-Fa-f]{2}([-:][0-9A-Fa-f]{2}){5}", out):   # no PowerShell: fall back to getmac
+                out = subprocess.run(["getmac", "/fo", "csv", "/nh"], capture_output=True, text=True,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5).stdout
+            for m in re.findall(r"([0-9A-Fa-f]{2}(?:[-:][0-9A-Fa-f]{2}){5})", out):
                 found.add(m.replace("-", ":").lower())
     except Exception as exc:
         log(f"couldn't read network addresses: {exc}")
@@ -940,6 +978,14 @@ class Kato(BigFiles, ClipboardSync, Mesh):
 
     def layout_loop(self):
         while self.running:
+            if not INPUT_SERVICE:                      # the desktop can be re-scaled or re-resolutioned live:
+                try:                                   # re-read, don't trust the size we read at startup ("sees old")
+                    now = screen_bounds()
+                    if now and now != self.bounds:
+                        log(f"screen is now {now[2]}x{now[3]} (was {self.bounds[2]}x{self.bounds[3]})")
+                        self.bounds = now
+                except Exception:
+                    pass
             self.adopt_by_hardware(self.cfg.name, self.hw)
             self.share_state()
             try:
