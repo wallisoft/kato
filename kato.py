@@ -2450,7 +2450,7 @@ def run_input_service(a):
                     app.uinput.release_all()
             except Exception:
                 pass
-            QTimer.singleShot(0, qapp.quit)
+            os._exit(3)                       # non-zero: the unit's Restart=on-failure cycles us back to the idle wait
     _session_watch = QTimer()
     _session_watch.timeout.connect(_watch_session)
     _session_watch.start(5000)
