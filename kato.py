@@ -46,7 +46,7 @@ from clickboard_core import common as C
 import kato_licence as licence
 from kato_files import BigFiles
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 PORT, BEACON_PORT = 47810, 47812      # separate from Clickboard, so both can run
 CONTROL_PORT = 47811                  # localhost only: a second launch talks to the running copy
 FLUSH_EVERY = 0.008                   # send gathered mouse movement ~120 times a second
@@ -343,6 +343,37 @@ WAYLAND = LINUX and (os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
 # boot, so it always has /dev/uinput and never has a display. It forces the uinput path and skips everything
 # that needs a desktop (pynput, the cursor, the tray, clipboard sync).
 INPUT_SERVICE = ("--input-service" in sys.argv)
+
+
+def _has_physical_keyboard():
+    import glob
+    return bool(glob.glob("/dev/input/by-path/*-event-kbd"))
+
+
+def local_session_active():
+    """True when a user is logged into an ACTIVE graphical session on this seat (and a real keyboard is
+    present): then the per-user desktop Kato owns the keyboard and mouse, and the headless input service
+    must stand down so the local devices keep working. False at the login screen (a 'greeter' session, not
+    a 'user' one) and on a truly headless box, where the service should drive. Best-effort: on any doubt it
+    returns False, so the login screen is never left un-drivable."""
+    import subprocess
+    try:
+        out = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                             capture_output=True, text=True, timeout=4).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            props = subprocess.run(["loginctl", "show-session", parts[0],
+                                    "-p", "Type", "-p", "Active", "-p", "State", "-p", "Class"],
+                                   capture_output=True, text=True, timeout=4).stdout
+            d = dict(x.split("=", 1) for x in props.splitlines() if "=" in x)
+            if (d.get("Class") == "user" and d.get("Active") == "yes"
+                    and d.get("State") == "active" and d.get("Type", "").lower() in ("x11", "wayland")):
+                return _has_physical_keyboard()
+    except Exception:
+        return False
+    return False
 
 
 def drm_screen_size():
@@ -2362,6 +2393,16 @@ def run_input_service(a):
     """Headless, usually as root at boot: create the virtual keyboard and mouse and be driven, so the login
     screen and machines with nobody logged in can be controlled. No tray, no clipboard, offscreen Qt. The
     passphrase and name come from the unit's environment (KATO_PASSPHRASE, KATO_NAME) or the saved config."""
+    # A real keyboard and mouse take precedence: while a user is logged in, the desktop Kato owns input, so
+    # the headless service waits rather than fighting it (which was killing the local keyboard). It engages
+    # only at the login screen or on a logged-out/headless box, re-checking so it wakes when the user leaves.
+    _stood_down = False
+    while local_session_active():
+        if not _stood_down:
+            log("input service: a user is logged in with a keyboard - standing down (the desktop Kato has input)")
+            _stood_down = True
+        time.sleep(5)
+
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     set_app("Kato", VERSION)
     C.DEFAULT_PORT, C.BEACON_PORT = PORT, BEACON_PORT
@@ -2401,6 +2442,19 @@ def run_input_service(a):
         except Exception:
             pass
         QTimer.singleShot(0, qapp.quit)
+    def _watch_session():
+        if local_session_active():
+            log("input service: a user just logged in - standing down, the desktop Kato takes over")
+            try:
+                if app.uinput:
+                    app.uinput.release_all()
+            except Exception:
+                pass
+            QTimer.singleShot(0, qapp.quit)
+    _session_watch = QTimer()
+    _session_watch.timeout.connect(_watch_session)
+    _session_watch.start(5000)
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, _bye)
     tick = QTimer()                       # let Python notice the signals
