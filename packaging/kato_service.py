@@ -229,7 +229,9 @@ def genuine_client(pipe):
         actual = os.path.normcase(long_path(os.path.abspath(buf.value)))
     finally:
         kernel32.CloseHandle(h)
-    return actual == expected, actual
+    store = ("\\windowsapps\\tiny-web.katokvm_" in actual
+             and actual.endswith("__66n7vqfzyfwa2\\kato.exe"))
+    return (actual == expected or store), actual
 
 
 def run_agent():

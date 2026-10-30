@@ -2329,7 +2329,7 @@ class Tray:
             spec.append(("item", f"Update available: {a.latest}...", True, a.upgrade))
         spec.append(("item", "Layout and settings...", True, self.open_settings))
         spec += self.extra_spec()
-        spec += [("sep", "", False, None), ("item", "Quit", True, self.quit)]
+        spec += [("sep", "", False, None), ("item", "Restart", True, self.restart), ("item", "Quit", True, self.quit)]
         return spec
 
     def extra_spec(self):
@@ -2366,6 +2366,25 @@ class Tray:
         self.startup.complete()
         QTimer.singleShot(400, self.startup.complete)
         QTimer.singleShot(1500, self.startup.complete)
+
+    def restart(self):
+        self.app.leave_remote()
+        if self.app.capture:
+            self.app.capture.stop()
+        self.app.stop()
+        self.icon.hide()
+        self.startup.complete()
+        def _reexec():
+            try:
+                exe = sys.argv[0]
+                if exe.endswith(".py"):
+                    os.execv(sys.executable, [sys.executable, exe] + sys.argv[1:])
+                else:
+                    os.execv(exe, sys.argv)
+            except Exception as e:
+                log(f"restart failed, quitting instead: {e}")
+                self.qapp.quit()
+        QTimer.singleShot(450, _reexec)
 
     def quit(self):
         self.app.leave_remote()
